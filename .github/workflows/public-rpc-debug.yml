@@ -36,7 +36,9 @@ jobs:
           import json, os, urllib.request, urllib.error
           name=os.environ['RPC_NAME']; url=os.environ['RPC_URL']
           permit2='0x000000000022d473030f116ddee9f6b43ac78ba3'
-          spender='0x'+'0'*24+'0000000000001ff3684f28c67538d4d072c22734'[2:]
+          allowance_holder='0x0000000000001ff3684f28c67538d4d072c22734'
+          spender='0x'+'0'*24+allowance_holder[2:]
+          assert len(spender)==66, spender
           approval='0xda9fa7c1b00402c17d0161b249b1ab8bbec047c5a52207b9c112deffd817036b'
           permit='0xc6a377bfc4eb120024a8ac08eef205be16b817020812c73223e81d1bdb9708ec'
           rid=0
@@ -44,7 +46,7 @@ jobs:
               global rid
               rid+=1
               body=json.dumps({'jsonrpc':'2.0','id':rid,'method':method,'params':params}).encode()
-              req=urllib.request.Request(url,data=body,headers={'Content-Type':'application/json','User-Agent':'0x-rpc-debug/1.0'})
+              req=urllib.request.Request(url,data=body,headers={'Content-Type':'application/json','User-Agent':'0x-rpc-debug/1.1'})
               try:
                   with urllib.request.urlopen(req,timeout=35) as r:
                       raw=r.read().decode(errors='replace')
@@ -62,7 +64,7 @@ jobs:
           head_value=None
           try: head_value=int(head['response']['result'],16)
           except Exception: pass
-          result={'provider':name,'url':url,'chain':chain,'head':head}
+          result={'provider':name,'url':url,'spender_topic':spender,'chain':chain,'head':head}
           if head_value is not None:
               frm=max(0,head_value-10000)
               for label,topic in [('approval',approval),('permit',permit)]:
