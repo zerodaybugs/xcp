@@ -1,0 +1,198 @@
+name: Collect public Permit2 allowance state
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-permit2-allowance-state.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ethereum:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Collect Permit2 approvals for the public allowance target
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/permit2-state"
+          mkdir -p "$OUT"
+          python3 - "$OUT" <<'PY'
+          import json, pathlib, sys, time, urllib.request
+
+          out = pathlib.Path(sys.argv[1])
+          rpc_url = 'https://eth.drpc.org'
+          permit2 = '0x000000000022d473030f116ddee9f6b43ac78ba3'
+          spender = '0x0000000000001ff3684f28c67538d4d072c22734'
+          spender_topic = '0x' + '0' * 24 + spender[2:]
+          topics = {
+              'Approval':'0xda9fa7c1b00402c17d0161b249b1ab8bbec047c5a52207b9c112deffd817036b',
+              'Permit':'0xc6a377bfc4eb120024a8ac08eef205be16b817020812c73223e81d1bdb9708ec',
+          }
+          request_id = 0
+
+          def rpc(method, params, attempts=6):
+              global request_id
+              last = None
+              for attempt in range(attempts):
+                  request_id += 1
+                  payload = json.dumps({'jsonrpc':'2.0','id':request_id,'method':method,'params':params}).encode()
+                  try:
+                      request = urllib.request.Request(
+                          rpc_url,
+                          data=payload,
+                          headers={'Content-Type':'application/json','User-Agent':'public-permit2-inventory/1.0'},
+                      )
+                      with urllib.request.urlopen(request, timeout=75) as response:
+                          obj = json.load(response)
+                      if 'error' in obj:
+                          raise RuntimeError(obj['error'])
+                      return obj['result']
+                  except Exception as exc:
+                      last = exc
+                      time.sleep(min(12, 2 ** attempt))
+              raise RuntimeError(f'{method}: {last!r}')
+
+          def scan(topic0, start, end):
+              rows, ranges = [], []
+              cursor, chunk = start, 500_000
+              while cursor <= end:
+                  stop = min(end, cursor + chunk - 1)
+                  query = {
+                      'fromBlock':hex(cursor),
+                      'toBlock':hex(stop),
+                      'address':permit2,
+                      'topics':[topic0, None, None, spender_topic],
+                  }
+                  try:
+                      batch = rpc('eth_getLogs', [query], attempts=3)
+                  except Exception as exc:
+                      if chunk > 2_000:
+                          chunk = max(2_000, chunk // 2)
+                          continue
+                      raise
+                  rows.extend(batch)
+                  ranges.append({'from':cursor,'to':stop,'count':len(batch)})
+                  cursor = stop + 1
+                  if not batch and chunk < 1_000_000:
+                      chunk = min(1_000_000, chunk * 2)
+                  elif len(batch) > 5_000:
+                      chunk = max(2_000, chunk // 2)
+              return rows, ranges
+
+          def topic_address(topic): return '0x' + topic[-40:].lower()
+          def word(address): return '0' * 24 + address[2:].lower()
+          def eth_call(to, data):
+              try: return rpc('eth_call',[{'to':to,'data':data},'latest'],attempts=4)
+              except Exception as exc: return {'error':repr(exc)}
+          def uint_call(to, data):
+              raw = eth_call(to, data)
+              if isinstance(raw, dict): return None, raw
+              try: return int(raw,16), raw
+              except Exception: return None, raw
+
+          head = int(rpc('eth_blockNumber', []), 16)
+          latest_block = rpc('eth_getBlockByNumber', ['latest', False])
+          now = int(latest_block['timestamp'], 16)
+          code = rpc('eth_getCode', [permit2, 'latest'])
+          if code in ('0x','0x0'):
+              raise SystemExit('Permit2 not deployed')
+
+          lo, hi = 0, head
+          while lo < hi:
+              mid = (lo + hi) // 2
+              historical = rpc('eth_getCode', [permit2, hex(mid)], attempts=3)
+              if historical not in ('0x','0x0'): hi = mid
+              else: lo = mid + 1
+          deployment = lo
+
+          events, range_evidence = [], {}
+          for name, topic0 in topics.items():
+              logs, ranges = scan(topic0, deployment, head)
+              range_evidence[name] = ranges
+              for log in logs:
+                  event_topics = log.get('topics', [])
+                  if len(event_topics) < 4: continue
+                  words = [int(log.get('data','0x')[2+i*64:2+(i+1)*64] or '0',16) for i in range(max(0,(len(log.get('data','0x'))-2)//64))]
+                  events.append({
+                      'kind':name,
+                      'owner':topic_address(event_topics[1]),
+                      'token':topic_address(event_topics[2]),
+                      'spender':topic_address(event_topics[3]),
+                      'event_amount':words[0] if words else None,
+                      'event_expiration':words[1] if len(words)>1 else None,
+                      'event_nonce':words[2] if len(words)>2 else None,
+                      'block':int(log['blockNumber'],16),
+                      'tx_index':int(log.get('transactionIndex','0x0'),16),
+                      'log_index':int(log.get('logIndex','0x0'),16),
+                      'tx_hash':log.get('transactionHash'),
+                  })
+          events.sort(key=lambda row:(row['block'],row['tx_index'],row['log_index']))
+          latest = {}
+          for event in events:
+              latest[(event['owner'],event['token'])] = event
+
+          active = []
+          checked = []
+          for (owner, token), event in sorted(latest.items()):
+              allowance_data = '0x927da105' + word(owner) + word(token) + word(spender)
+              raw = eth_call(permit2, allowance_data)
+              amount = expiration = nonce = None
+              if isinstance(raw, str) and raw.startswith('0x') and len(raw) >= 2 + 64 * 3:
+                  amount = int(raw[2:66],16)
+                  expiration = int(raw[66:130],16)
+                  nonce = int(raw[130:194],16)
+              balance, balance_raw = uint_call(token, '0x70a08231' + word(owner))
+              erc20_allowance, erc20_allowance_raw = uint_call(token, '0xdd62ed3e' + word(owner) + word(permit2))
+              effective = None
+              if amount is not None and balance is not None and erc20_allowance is not None:
+                  effective = min(amount,balance,erc20_allowance)
+              row = {
+                  **event,
+                  'amount_now':amount,
+                  'expiration_now':expiration,
+                  'nonce_now':nonce,
+                  'not_expired':expiration is not None and now <= expiration,
+                  'owner_token_balance':balance,
+                  'owner_erc20_allowance_to_permit2':erc20_allowance,
+                  'effective_stealable_now':effective,
+                  'allowance_raw':raw,
+                  'balance_raw':balance_raw,
+                  'erc20_allowance_raw':erc20_allowance_raw,
+              }
+              checked.append(row)
+              if effective not in (None,0) and row['not_expired']:
+                  active.append(row)
+
+          summary = {
+              'chain_id':1,
+              'head':head,
+              'timestamp':now,
+              'permit2':permit2,
+              'spender':spender,
+              'permit2_deployment_block':deployment,
+              'event_count':len(events),
+              'unique_owner_token_pairs':len(latest),
+              'active_exploitable_pair_count':len(active),
+              'active_exploitable_pairs':active,
+          }
+          (out/'summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True))
+          (out/'events.json').write_text(json.dumps(events,indent=2,sort_keys=True))
+          (out/'checked-pairs.json').write_text(json.dumps(checked,indent=2,sort_keys=True))
+          (out/'ranges.json').write_text(json.dumps(range_evidence,indent=2,sort_keys=True))
+          PY
+          find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+          test -s "$OUT/summary.json"
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-permit2-allowance-state-${{ github.run_id }}
+          path: permit2-state/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 9
