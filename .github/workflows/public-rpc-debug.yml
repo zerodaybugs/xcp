@@ -1,0 +1,72 @@
+name: Debug public Ethereum log providers
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-rpc-debug.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: publicnode, url: 'https://ethereum-rpc.publicnode.com'}
+          - {name: drpc, url: 'https://eth.drpc.org'}
+          - {name: llama, url: 'https://eth.llamarpc.com'}
+          - {name: blockscout, url: 'https://eth.blockscout.com/api/eth-rpc'}
+          - {name: onerpc, url: 'https://1rpc.io/eth'}
+          - {name: mevblocker, url: 'https://rpc.mevblocker.io'}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Probe RPC and filtered logs
+        env:
+          RPC_NAME: ${{ matrix.name }}
+          RPC_URL: ${{ matrix.url }}
+        shell: bash
+        run: |
+          set -u
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          name=os.environ['RPC_NAME']; url=os.environ['RPC_URL']
+          permit2='0x000000000022d473030f116ddee9f6b43ac78ba3'
+          spender='0x'+'0'*24+'0000000000001ff3684f28c67538d4d072c22734'[2:]
+          approval='0xda9fa7c1b00402c17d0161b249b1ab8bbec047c5a52207b9c112deffd817036b'
+          permit='0xc6a377bfc4eb120024a8ac08eef205be16b817020812c73223e81d1bdb9708ec'
+          rid=0
+          def rpc(method,params):
+              global rid
+              rid+=1
+              body=json.dumps({'jsonrpc':'2.0','id':rid,'method':method,'params':params}).encode()
+              req=urllib.request.Request(url,data=body,headers={'Content-Type':'application/json','User-Agent':'0x-rpc-debug/1.0'})
+              try:
+                  with urllib.request.urlopen(req,timeout=35) as r:
+                      raw=r.read().decode(errors='replace')
+                      status=r.status
+              except urllib.error.HTTPError as e:
+                  raw=e.read().decode(errors='replace'); status=e.code
+                  return {'http_status':status,'raw':raw[:1000]}
+              except Exception as e:
+                  return {'exception':type(e).__name__,'message':str(e)}
+              try: parsed=json.loads(raw)
+              except Exception: parsed={'raw':raw[:1000]}
+              return {'http_status':status,'response':parsed}
+          chain=rpc('eth_chainId',[])
+          head=rpc('eth_blockNumber',[])
+          head_value=None
+          try: head_value=int(head['response']['result'],16)
+          except Exception: pass
+          result={'provider':name,'url':url,'chain':chain,'head':head}
+          if head_value is not None:
+              frm=max(0,head_value-10000)
+              for label,topic in [('approval',approval),('permit',permit)]:
+                  q={'fromBlock':hex(frm),'toBlock':hex(head_value),'address':permit2,'topics':[topic,None,None,spender]}
+                  result[label]=rpc('eth_getLogs',[q])
+          print(json.dumps(result,indent=2,sort_keys=True))
+          PY
