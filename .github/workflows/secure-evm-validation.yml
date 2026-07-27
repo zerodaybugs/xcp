@@ -1,0 +1,162 @@
+name: Secure encrypted EVM validation
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/secure-evm-validation.yml'
+      - 'secure-evm-input/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out transport repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Generate one-run recipient certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p handshake-public
+          umask 077
+          openssl req -x509 -newkey rsa:4096 -sha256 -nodes -days 1 \
+            -subj '/CN=ephemeral-secure-evm-runner' \
+            -keyout /tmp/runner-private.pem \
+            -out handshake-public/runner-certificate.pem \
+            >/dev/null 2>&1
+          openssl x509 -in handshake-public/runner-certificate.pem \
+            -noout -fingerprint -sha256 \
+            > handshake-public/runner-certificate.sha256-fingerprint.txt
+          chmod 600 /tmp/runner-private.pem
+          chmod 644 handshake-public/*
+
+      - name: Publish one-run public certificate
+        uses: actions/upload-artifact@v4
+        with:
+          name: secure-evm-handshake-${{ github.run_id }}
+          path: handshake-public/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Retrieve encrypted input from updated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/transport
+          mkdir -p /tmp/transport
+          found=0
+          for attempt in $(seq 1 210); do
+            rm -rf /tmp/transport/repo
+            if git clone --quiet --depth 1 --branch secure-evm-validation-20260727 \
+                 https://github.com/zerodaybugs/xcp.git /tmp/transport/repo 2>/dev/null; then
+              if test -s /tmp/transport/repo/secure-evm-input/payload.cms \
+                 && test -s /tmp/transport/repo/secure-evm-input/payload.cms.sha256; then
+                cp /tmp/transport/repo/secure-evm-input/payload.cms /tmp/transport/payload.cms
+                cp /tmp/transport/repo/secure-evm-input/payload.cms.sha256 /tmp/transport/payload.cms.sha256
+                found=1
+                break
+              fi
+            fi
+            sleep 4
+          done
+          test "$found" -eq 1
+          (cd /tmp/transport && sha256sum --check --strict payload.cms.sha256)
+
+      - name: Decrypt, authenticate, and execute isolated validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p /tmp/secure-work /tmp/secure-evidence public-encrypted-result
+
+          openssl cms -decrypt -binary -inform DER \
+            -in /tmp/transport/payload.cms \
+            -recip handshake-public/runner-certificate.pem \
+            -inkey /tmp/runner-private.pem \
+            -out /tmp/secure-payload.tar.gz \
+            >/dev/null 2>&1
+          tar -xzf /tmp/secure-payload.tar.gz -C /tmp/secure-work
+          (cd /tmp/secure-work && sha256sum --check --strict INPUT_SHA256SUMS)
+          match_contract=$(cat /tmp/secure-work/MATCH_CONTRACT)
+
+          curl --fail --location --retry 4 --retry-all-errors \
+            https://github.com/foundry-rs/foundry/releases/download/v1.7.1/foundry_v1.7.1_linux_amd64.tar.gz \
+            --output /tmp/foundry.tar.gz \
+            >/dev/null 2>&1
+          echo 'cf7e688ed0c4c48adffca788b496076e31060b67ac5afe1e43dbb5499c20c88b  /tmp/foundry.tar.gz' \
+            | sha256sum --check --strict >/dev/null
+          tar -xzf /tmp/foundry.tar.gz -C /tmp
+          install -m 0755 /tmp/forge /tmp/secure-work/forge
+
+          curl --fail --location --retry 4 --retry-all-errors \
+            'https://binaries.soliditylang.org/linux-amd64/solc-linux-amd64-v0.8.24+commit.e11b9ed9' \
+            --output /tmp/secure-work/solc-0.8.24 \
+            >/dev/null 2>&1
+          echo 'fb03a29a517452b9f12bcf459ef37d0a543765bb3bbc911e70a87d6a37c30d5f  /tmp/secure-work/solc-0.8.24' \
+            | sha256sum --check --strict >/dev/null
+          chmod 0755 /tmp/secure-work/solc-0.8.24
+
+          /tmp/secure-work/forge --version > /tmp/secure-evidence/forge-version.txt 2>&1
+          /tmp/secure-work/solc-0.8.24 --version > /tmp/secure-evidence/solc-version.txt 2>&1
+          cp /tmp/secure-work/INPUT_SHA256SUMS /tmp/secure-evidence/
+          cp /tmp/secure-work/MATCH_CONTRACT /tmp/secure-evidence/
+          cp /tmp/secure-work/test/*.sol /tmp/secure-evidence/
+          cp /tmp/secure-work/foundry.toml /tmp/secure-evidence/
+
+          set +e
+          (cd /tmp/secure-work && ./forge build --force) \
+            > /tmp/secure-evidence/build.log 2>&1
+          build_status=$?
+
+          rm -rf /tmp/secure-work/cache /tmp/secure-work/out
+          (cd /tmp/secure-work && ./forge test --jobs 1 \
+            --match-contract "$match_contract" -vvvv) \
+            > /tmp/secure-evidence/run-1.log 2>&1
+          run1_status=$?
+
+          rm -rf /tmp/secure-work/cache /tmp/secure-work/out
+          (cd /tmp/secure-work && ./forge test --jobs 1 \
+            --match-contract "$match_contract" -vvvv) \
+            > /tmp/secure-evidence/run-2.log 2>&1
+          run2_status=$?
+          set -e
+
+          {
+            echo "build_exit=$build_status"
+            echo "run1_exit=$run1_status"
+            echo "run2_exit=$run2_status"
+          } > /tmp/secure-evidence/exit-status.txt
+
+          sha256sum /tmp/secure-evidence/* > /tmp/secure-evidence/SHA256SUMS
+          tar -czf /tmp/secure-evidence.tar.gz -C /tmp secure-evidence
+          openssl cms -encrypt -binary -aes-256-cbc -outform DER \
+            -in /tmp/secure-evidence.tar.gz \
+            -out public-encrypted-result/evidence.cms \
+            /tmp/secure-work/researcher-certificate.pem \
+            >/dev/null 2>&1
+          sha256sum public-encrypted-result/evidence.cms \
+            > public-encrypted-result/evidence.cms.sha256
+          printf 'encrypted-evidence-complete\n' \
+            > public-encrypted-result/STATUS.txt
+
+          shred -u /tmp/runner-private.pem /tmp/secure-payload.tar.gz \
+            /tmp/secure-evidence.tar.gz 2>/dev/null || true
+          rm -rf /tmp/secure-work /tmp/secure-evidence /tmp/transport
+
+      - name: Upload encrypted evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: secure-evm-encrypted-result-${{ github.run_id }}
+          path: public-encrypted-result/
+          if-no-files-found: warn
+          retention-days: 1
