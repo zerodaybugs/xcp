@@ -13,93 +13,47 @@ permissions:
 jobs:
   ethereum:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 10
     steps:
-      - name: Collect post-deployment ApprovalForAll state
+      - name: Query exact ApprovalForAll events targeting AllowanceHolder
         shell: bash
         run: |
           set -euo pipefail
           OUT="$GITHUB_WORKSPACE/public-state"
           mkdir -p "$OUT"
+          URL='https://eth.blockscout.com/api?module=logs&action=getLogs&fromBlock=0&toBlock=latest&topic0=0x17307eab39ab6107e8899845ad3d59bd9653f200f220920489ca2b5937696c31&topic2=0x000000000000000000000000000000000000000000001ff3684f28c67538d4d072c22734&topic0_2_opr=and&page=1&offset=1000'
+          printf '%s\n' "$URL" > "$OUT/query-url.txt"
+          curl -fsSL --retry 5 --retry-all-errors --max-time 120 "$URL" > "$OUT/raw.json"
           python3 - "$OUT" <<'PY'
-          import json, pathlib, sys, time, urllib.request
-          out=pathlib.Path(sys.argv[1])
-          rpc_url='https://eth.drpc.org'
-          operator='0x0000000000001ff3684f28c67538d4d072c22734'
-          topic0='0x17307eab39ab6107e8899845ad3d59bd9653f200f220920489ca2b5937696c31'
-          topic2='0x'+'0'*24+operator[2:]
-          rid=0
-          def rpc(method,params,attempts=6):
-              global rid
-              last=None
-              for i in range(attempts):
-                  rid+=1
-                  body=json.dumps({'jsonrpc':'2.0','id':rid,'method':method,'params':params}).encode()
-                  try:
-                      req=urllib.request.Request(rpc_url,data=body,headers={'Content-Type':'application/json','User-Agent':'public-state/1.0'})
-                      with urllib.request.urlopen(req,timeout=75) as r: obj=json.load(r)
-                      if 'error' in obj: raise RuntimeError(obj['error'])
-                      return obj['result']
-                  except Exception as e:
-                      last=e; time.sleep(min(12,2**i))
-              raise RuntimeError(f'{method}: {last!r}')
-          def addr(t): return '0x'+t[-40:].lower()
-          def word(a): return '0'*24+a[2:].lower()
-          def bool_call(to,data):
-              try: raw=rpc('eth_call',[{'to':to,'data':data},'latest'],3)
-              except Exception as e: return False,{'error':repr(e)}
-              try: return int(raw,16)!=0,raw
-              except Exception: return False,raw
-          head=int(rpc('eth_blockNumber',[]),16)
-          code=rpc('eth_getCode',[operator,'latest'])
-          if code in ('0x','0x0'): raise SystemExit('operator has no code')
-          lo,hi=0,head
-          while lo<hi:
-              mid=(lo+hi)//2
-              c=rpc('eth_getCode',[operator,hex(mid)],3)
-              if c not in ('0x','0x0'): hi=mid
-              else: lo=mid+1
-          deployment=lo
-          logs=[]; ranges=[]; cursor=deployment; chunk=100000
-          while cursor<=head:
-              stop=min(head,cursor+chunk-1)
-              q={'fromBlock':hex(cursor),'toBlock':hex(stop),'topics':[topic0,None,topic2]}
-              try: batch=rpc('eth_getLogs',[q],3)
-              except Exception as e:
-                  if chunk>2000:
-                      chunk=max(2000,chunk//2); continue
-                  raise
-              logs.extend(batch); ranges.append({'from':cursor,'to':stop,'count':len(batch)})
-              cursor=stop+1
-              if not batch and chunk<500000: chunk=min(500000,chunk*2)
-          events=[]
-          for log in logs:
-              ts=log.get('topics',[])
-              if len(ts)<3: continue
-              events.append({'token':log['address'].lower(),'owner':addr(ts[1]),'operator':addr(ts[2]),'approved':int(log.get('data','0x0'),16)!=0,'block':int(log['blockNumber'],16),'tx_index':int(log.get('transactionIndex','0x0'),16),'log_index':int(log.get('logIndex','0x0'),16),'tx_hash':log.get('transactionHash')})
-          events.sort(key=lambda x:(x['block'],x['tx_index'],x['log_index']))
-          latest={}
-          for e in events: latest[(e['token'],e['owner'])]=e
-          classified=[]
-          for (token,owner),e in sorted(latest.items()):
-              current,current_raw=bool_call(token,'0xe985e9c5'+word(owner)+word(operator))
-              erc1155,iface_raw=bool_call(token,'0x01ffc9a7'+'d9b67a26'+'0'*56)
-              erc721,erc721_raw=bool_call(token,'0x01ffc9a7'+'80ac58cd'+'0'*56)
-              classified.append({**e,'approved_now':current,'erc1155':erc1155,'erc721':erc721,'approved_now_raw':current_raw,'erc1155_raw':iface_raw,'erc721_raw':erc721_raw})
-          active=[r for r in classified if r['approved_now'] and r['erc1155']]
-          summary={'chain_id':1,'head':head,'operator':operator,'operator_code_bytes':(len(code)-2)//2,'deployment_block':deployment,'events':len(events),'unique_pairs':len(latest),'active_erc1155_count':len(active),'active_erc1155':active}
-          (out/'summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True))
-          (out/'events.json').write_text(json.dumps(events,indent=2,sort_keys=True))
-          (out/'classified.json').write_text(json.dumps(classified,indent=2,sort_keys=True))
-          (out/'ranges.json').write_text(json.dumps(ranges,indent=2,sort_keys=True))
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          obj = json.loads((root / 'raw.json').read_text())
+          result = obj.get('result', []) if isinstance(obj, dict) else []
+          if isinstance(result, str):
+              rows = [] if 'no logs' in result.lower() or 'no records' in result.lower() else None
+          elif isinstance(result, list):
+              rows = result
+          else:
+              rows = None
+          if rows is None:
+              raise SystemExit(f'unexpected Blockscout response: {obj!r}')
+          summary = {
+              'status': obj.get('status'),
+              'message': obj.get('message'),
+              'event_count': len(rows),
+              'events': rows,
+          }
+          (root / 'summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
+          print(json.dumps({'event_count': len(rows), 'message': obj.get('message')}, sort_keys=True))
           PY
           find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
           test -s "$OUT/summary.json"
       - name: Upload evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: public-operator-approval-state-${{ github.run_id }}
           path: public-state/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 2
           compression-level: 9
