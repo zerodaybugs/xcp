@@ -1,0 +1,113 @@
+name: Public read-only 0x static compiler gate V2
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-0x-static-compiler-gate-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compiler-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+
+      - name: Install pinned official Solidity 0.8.34
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-all-errors \
+            https://github.com/argotorg/solidity/releases/download/v0.8.34/solc-static-linux \
+            -o /tmp/solc-0.8.34
+          chmod 0755 /tmp/solc-0.8.34
+          /tmp/solc-0.8.34 --version | tee /tmp/solc-version.txt
+          grep -q 'Version: 0.8.34' /tmp/solc-version.txt
+
+      - name: Clone and build exact latest target
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out"; mkdir -p "$OUT"
+          cp /tmp/solc-version.txt "$OUT/solc-version.txt"
+          git clone https://github.com/0xProject/0x-settler.git target
+          cd target
+          git checkout -f 2bad36e7a9dc9660f52c7756d54ae7627f82e0f9
+          git submodule update --init --recursive
+          forge build --force --use /tmp/solc-0.8.34 2>&1 | tee "$OUT/forge-build.log"
+
+      - name: Slither call graph with pinned compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out"; cd "$GITHUB_WORKSPACE/target"
+          python3 -m pip install --quiet --disable-pip-version-check slither-analyzer networkx pydot
+          set +e
+          slither . --solc /tmp/solc-0.8.34 --print call-graph --filter-paths 'test|script|lib' > "$OUT/slither.log" 2>&1
+          RC=$?
+          set -e
+          printf '%s\n' "$RC" > "$OUT/slither-exit-code.txt"
+
+          python3 - "$OUT" "$GITHUB_WORKSPACE/target" <<'PY'
+          import json,pathlib,re,sys
+          import networkx as nx
+          out=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2])
+          graph=nx.DiGraph(); parsed=[]
+          for dot in root.rglob('*.dot'):
+              text=dot.read_text(errors='replace')
+              if 'digraph' not in text: continue
+              parsed.append(str(dot.relative_to(root)))
+              ids={}
+              for ident,label in re.findall(r'^\s*([A-Za-z0-9_]+)\s*\[label="([^"]*)"',text,re.M):
+                  ids[ident]=label; graph.add_node(label)
+              for a,b in re.findall(r'^\s*([A-Za-z0-9_]+)\s*->\s*([A-Za-z0-9_]+)',text,re.M):
+                  graph.add_edge(ids.get(a,a),ids.get(b,b))
+          source='\n'.join(p.read_text(errors='replace') for p in root.glob('src/**/*.sol'))
+          result={
+            'parsed_dot_files':parsed,
+            'nodes':graph.number_of_nodes(),
+            'edges':graph.number_of_edges(),
+            'mutual_recursion_sccs':[sorted(c) for c in nx.strongly_connected_components(graph) if len(c)>1],
+            'self_recursive_nodes':sorted(n for n in graph.nodes if graph.has_edge(n,n)),
+            'uses_layout_at':bool(re.search(r'\blayout\s+at\b',source)),
+            'delete_statements':re.findall(r'\bdelete\s+([A-Za-z_][A-Za-z0-9_\.\[\]]*)',source),
+            'transient_keyword_count':len(re.findall(r'\btransient\b',source)),
+            'tstore_count':source.count('tstore('),
+            'tload_count':source.count('tload('),
+          }
+          (out/'compiler-trigger-summary.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          PY
+
+      - name: Scan affected older exact sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out"
+          cd "$GITHUB_WORKSPACE/target"
+          for ref in 340ffbb23734843f6a569ba14360e9088009cc8c 111afe09957db8d0d895c6df64ee4c97077ef450 92bc8f11836fa96eaa7c5f0b1c371205dcafe245; do
+            git checkout -f "$ref"
+            git submodule update --init --recursive
+            D="$OUT/source-$ref"; mkdir -p "$D"
+            grep -RInE 'layout[[:space:]]+at|delete[[:space:]]+[A-Za-z_]|transient|tstore\(|tload\(' src > "$D/compiler-trigger-scan.txt" || true
+            grep -RInE 'function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*\(' src > "$D/functions.txt" || true
+          done
+
+      - name: Upload read-only compiler evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-0x-static-compiler-v2-${{ github.run_id }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 9
