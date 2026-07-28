@@ -1,0 +1,121 @@
+name: Public read-only 0x static compiler gate V3
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-0x-static-compiler-gate-v3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compiler-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      - name: Clone and build exact target revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out"; mkdir -p "$OUT"
+          forge --version | tee "$OUT/forge-version.txt"
+          git clone https://github.com/0xProject/0x-settler.git target
+          cd target
+          git submodule update --init --recursive
+
+          for ref in 340ffbb23734843f6a569ba14360e9088009cc8c 111afe09957db8d0d895c6df64ee4c97077ef450 92bc8f11836fa96eaa7c5f0b1c371205dcafe245 2bad36e7a9dc9660f52c7756d54ae7627f82e0f9; do
+            git checkout -f "$ref"
+            git submodule update --init --recursive
+            D="$OUT/$ref"; mkdir -p "$D"
+            set +e
+            forge build --force > "$D/forge-build.log" 2>&1
+            RC=$?
+            set -e
+            printf '%s\n' "$RC" > "$D/forge-exit-code.txt"
+            grep -RInE 'layout[[:space:]]+at|delete[[:space:]]+[A-Za-z_]|transient|tstore\(|tload\(' src > "$D/compiler-trigger-scan.txt" || true
+            grep -RInE 'function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*\(' src > "$D/functions.txt" || true
+          done
+
+      - name: Analyze exact call graphs with installed compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out"; cd "$GITHUB_WORKSPACE/target"
+          python3 -m pip install --quiet --disable-pip-version-check slither-analyzer networkx pydot
+          find "$HOME/.svm" -maxdepth 3 -type f -name 'solc-*' -printf '%p\n' | sort > "$OUT/installed-solc.txt" || true
+
+          python3 - "$OUT" "$GITHUB_WORKSPACE/target" <<'PY'
+          import json,pathlib,re,subprocess,sys
+          import networkx as nx
+          out=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2])
+          refs={
+            '340ffbb23734843f6a569ba14360e9088009cc8c':'0.8.33',
+            '111afe09957db8d0d895c6df64ee4c97077ef450':'0.8.33',
+            '92bc8f11836fa96eaa7c5f0b1c371205dcafe245':'0.8.34',
+            '2bad36e7a9dc9660f52c7756d54ae7627f82e0f9':'0.8.34',
+          }
+          targets=[
+            'src/chains/Mainnet/TakerSubmitted.sol',
+            'src/chains/Mainnet/MetaTxn.sol',
+            'src/chains/Mainnet/Intent.sol',
+            'src/chains/Mainnet/BridgeSettler.sol',
+          ]
+          aggregate={}
+          for ref,version in refs.items():
+              subprocess.run(['git','checkout','-f',ref],cwd=root,check=True,stdout=subprocess.DEVNULL)
+              subprocess.run(['git','submodule','update','--init','--recursive'],cwd=root,check=True,stdout=subprocess.DEVNULL)
+              candidates=list(pathlib.Path.home().glob(f'.svm/{version}/solc-{version}'))
+              solc=str(candidates[0]) if candidates else None
+              result={'solc':solc,'targets':{}}
+              for target in targets:
+                  if not (root/target).exists(): continue
+                  tname=pathlib.Path(target).stem
+                  log=out/ref/f'slither-{tname}.log'
+                  dots_before=set(root.rglob('*.dot'))
+                  cmd=['slither',target,'--print','call-graph','--filter-paths','test|script|lib']
+                  if solc: cmd += ['--solc',solc]
+                  p=subprocess.run(cmd,cwd=root,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+                  log.write_text(p.stdout)
+                  dots_after=set(root.rglob('*.dot'))
+                  dots=sorted(dots_after-dots_before)
+                  graph=nx.DiGraph(); parsed=[]
+                  for dot in dots:
+                      text=dot.read_text(errors='replace'); parsed.append(str(dot.relative_to(root)))
+                      ids={}
+                      for ident,label in re.findall(r'^\s*([A-Za-z0-9_]+)\s*\[label="([^"]*)"',text,re.M):
+                          ids[ident]=label; graph.add_node(label)
+                      for a,b in re.findall(r'^\s*([A-Za-z0-9_]+)\s*->\s*([A-Za-z0-9_]+)',text,re.M):
+                          graph.add_edge(ids.get(a,a),ids.get(b,b))
+                  result['targets'][target]={
+                    'exit_code':p.returncode,
+                    'dot_files':parsed,
+                    'nodes':graph.number_of_nodes(),
+                    'edges':graph.number_of_edges(),
+                    'mutual_recursion_sccs':[sorted(c) for c in nx.strongly_connected_components(graph) if len(c)>1],
+                    'self_recursive_nodes':sorted(n for n in graph.nodes if graph.has_edge(n,n)),
+                  }
+                  for dot in dots:
+                      dot.unlink(missing_ok=True)
+              aggregate[ref]=result
+          (out/'callgraph-summary.json').write_text(json.dumps(aggregate,indent=2,sort_keys=True)+'\n')
+          PY
+
+      - name: Upload read-only compiler evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-0x-static-compiler-v3-${{ github.run_id }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 9
