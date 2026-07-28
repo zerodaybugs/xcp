@@ -1,0 +1,179 @@
+name: Public read-only 0x static compiler gate
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-0x-static-compiler-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+
+      - name: Clone public target and collect exact-source evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out"
+          mkdir -p "$OUT"
+          git clone https://github.com/0xProject/0x-settler.git target
+          cd target
+          git submodule update --init --recursive
+
+          REFS=(
+            340ffbb23734843f6a569ba14360e9088009cc8c
+            111afe09957db8d0d895c6df64ee4c97077ef450
+            92bc8f11836fa96eaa7c5f0b1c371205dcafe245
+            2bad36e7a9dc9660f52c7756d54ae7627f82e0f9
+          )
+          printf '%s\n' "${REFS[@]}" > "$OUT/refs.txt"
+          git log --date=iso-strict --pretty=format:'%H%x09%ad%x09%s' 340ffbb23734843f6a569ba14360e9088009cc8c..2bad36e7a9dc9660f52c7756d54ae7627f82e0f9 -- src > "$OUT/old-taker-src-commits.tsv"
+          git log --date=iso-strict --pretty=format:'%H%x09%ad%x09%s' 111afe09957db8d0d895c6df64ee4c97077ef450..2bad36e7a9dc9660f52c7756d54ae7627f82e0f9 -- src > "$OUT/old-bridge-src-commits.tsv"
+          git log --date=iso-strict --pretty=format:'%H%x09%ad%x09%s' --all --grep='Bug!\|fix\|security\|malleab\|smuggl\|overflow\|callback\|slippage\|refund\|allowance' -i > "$OUT/security-keyword-commits.tsv"
+
+          for ref in "${REFS[@]}"; do
+            git checkout -f "$ref"
+            git submodule update --init --recursive
+            D="$OUT/source-$ref"; mkdir -p "$D"
+            grep -RInE 'layout[[:space:]]+at|delete[[:space:]]+[A-Za-z_]|transient|tstore\(|tload\(' src > "$D/compiler-trigger-scan.txt" || true
+            grep -RInE 'call\(gas\(\)|\.call\{|delegatecall\(|staticcall\(|safeApproveIfBelow' src > "$D/external-sites.txt" || true
+            grep -RInE 'mload\([^)]*(offset|Offset|Ptr)|mstore\([^)]*(offset|Offset|Ptr)|calldataload\([^)]*(offset|Offset)' src/core src/bridge > "$D/pointer-sites.txt" || true
+          done
+
+          git checkout -f 2bad36e7a9dc9660f52c7756d54ae7627f82e0f9
+          git submodule update --init --recursive
+          forge build --force 2>&1 | tee "$OUT/latest-forge-build.log"
+
+      - name: Run Slither call graph and compiler-trigger classifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out"
+          cd "$GITHUB_WORKSPACE/target"
+          python3 -m pip install --quiet --disable-pip-version-check slither-analyzer networkx pydot
+          set +e
+          slither . --print call-graph --filter-paths 'test|script|lib' > "$OUT/slither-callgraph.log" 2>&1
+          RC=$?
+          set -e
+          printf '%s\n' "$RC" > "$OUT/slither-exit-code.txt"
+
+          python3 - "$OUT" "$GITHUB_WORKSPACE/target" <<'PY'
+          import json,pathlib,re,sys
+          import networkx as nx
+          out=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2])
+          graph=nx.DiGraph(); parsed=[]
+          for dot in root.rglob('*.dot'):
+              text=dot.read_text(errors='replace')
+              if 'digraph' not in text: continue
+              parsed.append(str(dot.relative_to(root)))
+              ids={}
+              for ident,label in re.findall(r'^\s*([A-Za-z0-9_]+)\s*\[label="([^"]*)"',text,re.M):
+                  ids[ident]=label; graph.add_node(label)
+              for a,b in re.findall(r'^\s*([A-Za-z0-9_]+)\s*->\s*([A-Za-z0-9_]+)',text,re.M):
+                  graph.add_edge(ids.get(a,a),ids.get(b,b))
+          source='\n'.join(p.read_text(errors='replace') for p in root.glob('src/**/*.sol'))
+          result={
+            'parsed_dot_files':parsed,
+            'nodes':graph.number_of_nodes(),
+            'edges':graph.number_of_edges(),
+            'mutual_recursion_sccs':[sorted(c) for c in nx.strongly_connected_components(graph) if len(c)>1],
+            'self_recursive_nodes':sorted(n for n in graph.nodes if graph.has_edge(n,n)),
+            'uses_layout_at':bool(re.search(r'\blayout\s+at\b',source)),
+            'delete_statements':re.findall(r'\bdelete\s+([A-Za-z_][A-Za-z0-9_\.\[\]]*)',source),
+            'transient_keyword_count':len(re.findall(r'\btransient\b',source)),
+            'tstore_count':source.count('tstore('),
+            'tload_count':source.count('tload('),
+          }
+          (out/'compiler-trigger-summary.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          PY
+
+      - name: Query public Safe-owner and deployed-runtime state
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out/onchain"; mkdir -p "$OUT"
+          RPCS=('https://eth.drpc.org' 'https://eth.blockscout.com/api/eth-rpc' 'https://eth.llamarpc.com' 'https://rpc.mevblocker.io')
+          OWNERS=(
+            0xeFA8f8b23dad0741203340041BF41b20F97fEed2 0x24420bC8C760787F3eEF3b809e81f44d31a9c5A2
+            0x052809d05DC83F317b2f578710411e6cbF88AC5a 0xDCa4ee0070b4aa44b30D8af22F3CBbb2cC859dAf
+            0xD6B66609E5C05210BE0A690aB3b9788BA97aFa60 0x56dcD10E83883e6F99a6241fdD27812caE55860e
+            0x7331B6B80264f76347F1C57d15362686cB6D7f40 0x6110e5ed5b0ae0D8BE9294437bA69334A525e29a
+            0x0256fA91Bc0e658A0550C2f4931c7c1aA9A07b7A
+          )
+          CONTRACTS=(
+            0x0889e9327b98D7d1BE3C301A4585ff3330502c9A 0x7f54F05635d15Cde17A49502fEdB9D1803A3Be8A
+            0xD7185c486dD88eb9F3573B878a1469485644091F 0x2eCBa8E35F659Df6f5D6614D63276aa58d7D5422
+            0x0038DFB2bBc353Daa6aD22Cb11Ee1D78f41B59cd
+          )
+          : > "$OUT/raw.tsv"
+          for rpc in "${RPCS[@]}"; do
+            chain=$(cast chain-id --rpc-url "$rpc" 2>/dev/null || true); head=$(cast block-number --rpc-url "$rpc" 2>/dev/null || true)
+            printf '%s\tchain\t%s\n%s\thead\t%s\n' "$rpc" "$chain" "$rpc" "$head" >> "$OUT/raw.tsv"
+            [ "$chain" = 1 ] || continue
+            for a in "${OWNERS[@]}"; do
+              code=$(cast code "$a" --rpc-url "$rpc" 2>/dev/null || true); hash=$(cast codehash "$a" --rpc-url "$rpc" 2>/dev/null || true); nonce=$(cast nonce "$a" --rpc-url "$rpc" 2>/dev/null || true)
+              printf '%s\towner:%s:code\t%s\n%s\towner:%s:codehash\t%s\n%s\towner:%s:nonce\t%s\n' "$rpc" "$a" "$code" "$rpc" "$a" "$hash" "$rpc" "$a" "$nonce" >> "$OUT/raw.tsv"
+            done
+            for a in "${CONTRACTS[@]}"; do
+              code=$(cast code "$a" --rpc-url "$rpc" 2>/dev/null || true); hash=$(cast codehash "$a" --rpc-url "$rpc" 2>/dev/null || true); bal=$(cast balance "$a" --rpc-url "$rpc" 2>/dev/null || true)
+              chars=${#code}; bytes=$(( chars > 2 ? (chars-2)/2 : 0 ))
+              printf '%s\tcontract:%s:code_bytes\t%s\n%s\tcontract:%s:codehash\t%s\n%s\tcontract:%s:native_balance\t%s\n' "$rpc" "$a" "$bytes" "$rpc" "$a" "$hash" "$rpc" "$a" "$bal" >> "$OUT/raw.tsv"
+            done
+          done
+          python3 - "$OUT" <<'PY'
+          import json,pathlib,sys
+          root=pathlib.Path(sys.argv[1]); by={}
+          for line in (root/'raw.tsv').read_text().splitlines():
+              rpc,label,value=line.split('\t',2); by.setdefault(label,{})[rpc]=value
+          consensus={}
+          for label,vals in sorted(by.items()):
+              good=[v for v in vals.values() if v!='']; consensus[label]={'value':good[0] if good and all(x==good[0] for x in good) else None,'rpc_values':vals}
+          owners={}
+          for label,data in consensus.items():
+              if label.startswith('owner:') and label.endswith(':code'):
+                  addr=label.split(':')[1]; code=data['value']; owners[addr]={'code':code,'is_eoa':code=='0x','is_eip7702':isinstance(code,str) and code.lower().startswith('0xef0100') and len(code)==48}
+          (root/'summary.json').write_text(json.dumps({'consensus':consensus,'owners':owners},indent=2,sort_keys=True)+'\n')
+          PY
+
+      - name: Rank post-deployment security deltas
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/out"; cd "$GITHUB_WORKSPACE/target"
+          python3 - "$OUT" <<'PY'
+          import json,pathlib,subprocess,sys
+          out=pathlib.Path(sys.argv[1]); rows=[]
+          keys=('bug','fix','security','malleab','smuggl','overflow','callback','slippage','refund','allowance','authorization','signature')
+          for source in ('old-taker-src-commits.tsv','old-bridge-src-commits.tsv'):
+              for line in (out/source).read_text(errors='replace').splitlines():
+                  if not line.strip(): continue
+                  sha,date,msg=line.split('\t',2); score=sum(k in msg.lower() for k in keys)
+                  if score:
+                      stat=subprocess.run(['git','show','--stat','--oneline','--format=%H%n%s',sha,'--','src'],capture_output=True,text=True).stdout
+                      rows.append({'source':source,'sha':sha,'date':date,'message':msg,'score':score,'stat':stat})
+          rows.sort(key=lambda r:(-r['score'],r['date']))
+          (out/'ranked-security-deltas.json').write_text(json.dumps(rows,indent=2,sort_keys=True)+'\n')
+          PY
+
+      - name: Upload read-only evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-0x-static-compiler-gate-${{ github.run_id }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 9
