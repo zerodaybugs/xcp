@@ -32,9 +32,9 @@ jobs:
           - {shard: '12', start: 24150000, end: 24537499}
           - {shard: '13', start: 24537500, end: 24924999}
           - {shard: '14', start: 24925000, end: 25312499}
-          - {shard: '15', start: 25312500, end: 25699999}
+          - {shard: '15', start: 25312500, end: 25700000}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Scan exact Permit2 events for AllowanceHolder
         env:
@@ -47,7 +47,7 @@ jobs:
           OUT="$GITHUB_WORKSPACE/permit2-state-$SHARD"
           mkdir -p "$OUT"
           python3 - "$OUT" <<'PY'
-          import json, os, pathlib, sys, time, urllib.request
+          import json, os, pathlib, sys, time, urllib.error, urllib.request
 
           out = pathlib.Path(sys.argv[1])
           shard = os.environ['SHARD']
@@ -56,12 +56,17 @@ jobs:
           permit2 = '0x000000000022d473030f116ddee9f6b43ac78ba3'
           spender = '0x0000000000001ff3684f28c67538d4d072c22734'
           spender_topic = '0x' + '0' * 24 + spender[2:]
-          approval_topic = '0xda9fa7c1b00402c17d0161b249b1ab8bbec047c5a52207b9c112deffd817036b'
-          permit_topic = '0xc6a377bfc4eb120024a8ac08eef205be16b817020812c73223e81d1bdb9708ec'
+          assert len(spender_topic) == 66
+          topics = {
+              'Approval': '0xda9fa7c1b00402c17d0161b249b1ab8bbec047c5a52207b9c112deffd817036b',
+              'Permit': '0xc6a377bfc4eb120024a8ac08eef205be16b817020812c73223e81d1bdb9708ec',
+          }
           rpcs = [
-              'https://ethereum-rpc.publicnode.com',
+              'https://eth.blockscout.com/api/eth-rpc',
               'https://eth.drpc.org',
               'https://eth.llamarpc.com',
+              'https://rpc.mevblocker.io',
+              'https://1rpc.io/eth',
           ]
           rid = 0
 
@@ -70,62 +75,73 @@ jobs:
               rid += 1
               body = json.dumps({'jsonrpc':'2.0','id':rid,'method':method,'params':params}).encode()
               req = urllib.request.Request(
-                  url, data=body,
-                  headers={'Content-Type':'application/json','User-Agent':'0x-public-state-scan/2.0'},
+                  url,
+                  data=body,
+                  headers={'Content-Type':'application/json','User-Agent':'0x-public-state-scan/3.0'},
               )
-              with urllib.request.urlopen(req, timeout=timeout) as response:
-                  obj = json.load(response)
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as response:
+                      obj = json.load(response)
+              except urllib.error.HTTPError as exc:
+                  raw = exc.read().decode(errors='replace')
+                  raise RuntimeError({'http_status': exc.code, 'body': raw[:600]}) from exc
               if 'error' in obj:
                   raise RuntimeError(obj['error'])
               return obj['result']
 
-          def rpc(method, params, attempts=5):
+          def rpc(method, params, attempts=2):
               errors = []
-              for attempt in range(attempts):
-                  url = rpcs[(attempt + int(shard)) % len(rpcs)]
-                  try:
-                      return one_rpc(url, method, params), url
-                  except Exception as exc:
-                      errors.append({'rpc':url,'error':repr(exc)})
-                      time.sleep(min(6, 1 + attempt))
+              for url in rpcs:
+                  for attempt in range(attempts):
+                      try:
+                          return one_rpc(url, method, params), url
+                      except Exception as exc:
+                          errors.append({'rpc':url,'attempt':attempt,'error':repr(exc)})
+                          time.sleep(0.5 + attempt)
               raise RuntimeError({'method':method,'errors':errors})
 
           head_raw, head_rpc = rpc('eth_blockNumber', [])
           head = int(head_raw, 16)
-          latest_block, _ = rpc('eth_getBlockByNumber', ['latest', False])
+          latest_block, _ = rpc('eth_getBlockByNumber', [hex(max(0, head - 32)), False])
           now = int(latest_block['timestamp'], 16)
-          end = min(configured_end, head)
+          end = min(configured_end, max(0, head - 32))
 
-          logs = []
+          all_logs = []
           ranges = []
-          cursor = start
-          chunk = 10_000
-          while cursor <= end:
-              stop = min(end, cursor + chunk - 1)
-              query = {
-                  'fromBlock':hex(cursor),
-                  'toBlock':hex(stop),
-                  'address':permit2,
-                  'topics':[[approval_topic, permit_topic], None, None, spender_topic],
-              }
-              try:
-                  batch, used_rpc = rpc('eth_getLogs', [query], attempts=6)
-              except Exception:
-                  if chunk > 1_000:
-                      chunk //= 2
+          gaps = []
+          for kind, topic0 in topics.items():
+              cursor = start
+              chunk = 5_000
+              while cursor <= end:
+                  stop = min(end, cursor + chunk - 1)
+                  query = {
+                      'fromBlock':hex(cursor),
+                      'toBlock':hex(stop),
+                      'address':permit2,
+                      'topics':[topic0, None, None, spender_topic],
+                  }
+                  try:
+                      batch, used_rpc = rpc('eth_getLogs', [query], attempts=2)
+                  except Exception as exc:
+                      if chunk > 250:
+                          chunk = max(250, chunk // 2)
+                          continue
+                      gaps.append({'kind':kind,'from':cursor,'to':stop,'error':repr(exc)})
+                      cursor = stop + 1
                       continue
-                  raise
-              logs.extend(batch)
-              ranges.append({'from':cursor,'to':stop,'count':len(batch),'rpc':used_rpc})
-              cursor = stop + 1
-              if not batch and chunk < 25_000:
-                  chunk = min(25_000, chunk * 2)
+                  for row in batch:
+                      row['_kind'] = kind
+                  all_logs.extend(batch)
+                  ranges.append({'kind':kind,'from':cursor,'to':stop,'count':len(batch),'rpc':used_rpc})
+                  cursor = stop + 1
+                  if not batch and chunk < 10_000:
+                      chunk = min(10_000, chunk * 2)
 
           def addr(topic): return '0x' + topic[-40:].lower()
           def word(address): return '0' * 24 + address[2:].lower()
           def eth_call(to, data):
               try:
-                  return rpc('eth_call', [{'to':to,'data':data}, 'latest'], attempts=5)[0]
+                  return rpc('eth_call', [{'to':to,'data':data}, hex(max(0, head - 32))], attempts=2)[0]
               except Exception as exc:
                   return {'error':repr(exc)}
           def uint_call(to, data):
@@ -135,17 +151,17 @@ jobs:
               except Exception: return None, raw
 
           events = []
-          for log in logs:
-              topics = log.get('topics', [])
-              if len(topics) < 4:
+          for log in all_logs:
+              event_topics = log.get('topics', [])
+              if len(event_topics) < 4:
                   continue
               data = log.get('data','0x')[2:]
               words = [int(data[i:i+64] or '0',16) for i in range(0,len(data),64)]
               events.append({
-                  'kind':'Approval' if topics[0].lower() == approval_topic else 'Permit',
-                  'owner':addr(topics[1]),
-                  'token':addr(topics[2]),
-                  'spender':addr(topics[3]),
+                  'kind':log['_kind'],
+                  'owner':addr(event_topics[1]),
+                  'token':addr(event_topics[2]),
+                  'spender':addr(event_topics[3]),
                   'event_amount':words[0] if words else None,
                   'event_expiration':words[1] if len(words)>1 else None,
                   'event_nonce':words[2] if len(words)>2 else None,
@@ -153,7 +169,7 @@ jobs:
                   'tx_hash':log.get('transactionHash'),
                   'log_index':int(log.get('logIndex','0x0'),16),
               })
-          events.sort(key=lambda x:(x['block'],x['log_index']))
+          events.sort(key=lambda row:(row['block'],row['log_index']))
           latest = {}
           for event in events:
               latest[(event['owner'],event['token'])] = event
@@ -200,6 +216,7 @@ jobs:
               'head_rpc':head_rpc,
               'timestamp':now,
               'range_count':len(ranges),
+              'gap_count':len(gaps),
               'event_count':len(events),
               'unique_owner_token_pairs':len(latest),
               'active_exploitable_pair_count':len(active),
@@ -209,12 +226,16 @@ jobs:
           (out/'events.json').write_text(json.dumps(events,indent=2,sort_keys=True)+'\n')
           (out/'checked-pairs.json').write_text(json.dumps(checked,indent=2,sort_keys=True)+'\n')
           (out/'ranges.json').write_text(json.dumps(ranges,indent=2,sort_keys=True)+'\n')
+          (out/'gaps.json').write_text(json.dumps(gaps,indent=2,sort_keys=True)+'\n')
           print(json.dumps({
               'shard':shard,
               'events':len(events),
               'active':len(active),
+              'gaps':len(gaps),
               'scanned':[start,end],
           }, sort_keys=True))
+          if gaps:
+              raise SystemExit(f'incomplete scan: {len(gaps)} gaps')
           PY
           find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
           test -s "$OUT/summary.json"
