@@ -1,0 +1,93 @@
+name: Bind public live CrossChainReceiverFactory source
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-crosschainreceiver-live-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ethereum:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - name: Collect verified metadata, source anchors and live runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/crosschainreceiver-live"
+          mkdir -p "$OUT"
+          ADDRESS=0x00000000000000304861c3aDfb80dd5ebeC96325
+          RPC=https://eth.blockscout.com/api/eth-rpc
+          API=https://eth.blockscout.com/api/v2
+          DEPLOY_COMMIT=b934996e4310f9830f6609cef34246af36d4be46
+
+          curl -fsSL --retry 4 --max-time 90 "$API/smart-contracts/$ADDRESS" > "$OUT/blockscout-smart-contract.json"
+          curl -fsSL --retry 4 --max-time 90 "$API/addresses/$ADDRESS" > "$OUT/blockscout-address.json"
+          curl -fsSL --retry 4 --max-time 90 "https://raw.githubusercontent.com/0xProject/0x-settler/$DEPLOY_COMMIT/src/CrossChainReceiverFactory.sol" > "$OUT/CrossChainReceiverFactory-deployment-anchor.sol"
+          curl -fsSL --retry 4 --max-time 90 "https://raw.githubusercontent.com/0xProject/0x-settler/$DEPLOY_COMMIT/foundry.toml" > "$OUT/foundry-deployment-anchor.toml"
+          curl -fsSL --retry 4 --max-time 90 "https://raw.githubusercontent.com/0xProject/0x-settler/$DEPLOY_COMMIT/src/interfaces/ICrossChainReceiverFactory.sol" > "$OUT/ICrossChainReceiverFactory-deployment-anchor.sol"
+
+          cast code "$ADDRESS" --rpc-url "$RPC" > "$OUT/runtime.hex"
+          cast codehash "$ADDRESS" --rpc-url "$RPC" > "$OUT/runtime-codehash.txt"
+          cast block-number --rpc-url "$RPC" > "$OUT/head.txt"
+          cast call "$ADDRESS" 'name()(string)' --rpc-url "$RPC" > "$OUT/name.txt"
+
+          python3 - "$OUT" <<'PY'
+          import json, pathlib, re, sys
+          root=pathlib.Path(sys.argv[1])
+          meta=json.loads((root/'blockscout-smart-contract.json').read_text())
+          src=(root/'CrossChainReceiverFactory-deployment-anchor.sol').read_text()
+          runtime=(root/'runtime.hex').read_text().strip()
+          selectors={
+            'deploy(bytes32,bool,address)': 'ab8d26d0',
+            'approvePermit2(address,uint256)': '8423ba8d',
+            'call(address,uint256,bytes)': 'c6fda72a',
+            'cleanup(address)': 'ea059a2e',
+            'metaTx((address,uint8,uint256,bytes)[],uint256,uint256,bytes)': None,
+            'getFromMulticall(address,address)': None,
+          }
+          # Use source-level function inventory and runtime PUSH4 inventory rather than trusting guessed selectors.
+          funcs=sorted(set(re.findall(r'function\s+([A-Za-z0-9_]+)\s*\(',src)))
+          push4=sorted(set(re.findall(r'63([0-9a-fA-F]{8})', runtime[2:] if runtime.startswith('0x') else runtime)))
+          summary={
+            'address':'0x00000000000000304861c3aDfb80dd5ebeC96325',
+            'deployment_anchor':'b934996e4310f9830f6609cef34246af36d4be46',
+            'runtime_bytes':max(0,(len(runtime)-2)//2),
+            'runtime_codehash':(root/'runtime-codehash.txt').read_text().strip(),
+            'verified_name':meta.get('name'),
+            'compiler_version':meta.get('compiler_version'),
+            'optimization_enabled':meta.get('optimization_enabled'),
+            'optimization_runs':meta.get('optimization_runs'),
+            'evm_version':meta.get('evm_version'),
+            'is_fully_verified':meta.get('is_fully_verified'),
+            'verified_at':meta.get('verified_at'),
+            'source_function_names':funcs,
+            'runtime_push4_selectors':push4,
+            'has_metaTx_source': 'function metaTx(' in src,
+            'has_getFromMulticall_source': 'function getFromMulticall(' in src,
+            'has_approvePermit2_source': 'function approvePermit2(' in src,
+          }
+          (root/'summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          assert summary['runtime_bytes'] > 1000
+          assert summary['has_approvePermit2_source']
+          assert not summary['has_metaTx_source']
+          PY
+
+          find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+          test -s "$OUT/summary.json"
+      - name: Upload source binding
+        uses: actions/upload-artifact@v4
+        with:
+          name: crosschainreceiver-live-source-${{ github.run_id }}
+          path: crosschainreceiver-live/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 9
