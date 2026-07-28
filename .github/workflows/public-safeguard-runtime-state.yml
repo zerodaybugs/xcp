@@ -1,0 +1,102 @@
+name: Snapshot public 0x SafeGuard runtime state
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-safeguard-runtime-state.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: drpc, rpc: 'https://eth.drpc.org'}
+          - {name: blockscout, rpc: 'https://eth.blockscout.com/api/eth-rpc'}
+          - {name: mevblocker, rpc: 'https://rpc.mevblocker.io'}
+          - {name: onerpc, rpc: 'https://1rpc.io/eth'}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - name: Read guard, fallback, module and predicted runtime state
+        env:
+          RPC_NAME: ${{ matrix.name }}
+          RPC_URL: ${{ matrix.rpc }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/safeguard-$RPC_NAME"
+          mkdir -p "$OUT"
+          UPGRADE=0xf36b9f50E59870A24F42F9Ba43b2aD0A4b8f2F51
+          DEPLOYMENT=0x8E5DE7118a596E99B0563D3022039c11927f4827
+          MODULE=0x1CeC01DC0fFEE5eB5aF47DbEc1809F2A7c601C30
+          GUARD_SLOT=0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8
+          FALLBACK_SLOT=0x6c9a6c4a39284e37ed1cf53dbe894e64e87d225c116d7c7d37b71f8e954a400
+          CANDIDATES='0x702138716153534E1b39b9FFdbdEfC9C1712f264 0x253FaDb788c3B796eAa8a7fBcC1644c803fdFD6e 0xCCfd0Fc8CF13e7A2b2Af21a08d6cfB9fF9e1718b 0x5571d1a29Be4160EF0Aaa084A682450e4a858A74'
+
+          : > "$OUT/raw.tsv"
+          record() { printf '%s\t%s\n' "$1" "$2" >> "$OUT/raw.tsv"; }
+          call() { local v; v=$(cast call "$2" "$3" ${4:-} --rpc-url "$RPC_URL" 2>&1 || true); v=${v//$'\n'/ }; record "$1" "$v"; }
+          store() { local v; v=$(cast storage "$2" "$3" --rpc-url "$RPC_URL" 2>&1 || true); v=${v//$'\n'/ }; record "$1" "$v"; }
+          code() { local v; v=$(cast code "$2" --rpc-url "$RPC_URL" 2>&1 || true); printf '%s\n' "$v" > "$OUT/$1-code.hex"; record "$1.code_bytes" "$(( (${#v} > 2 ? ${#v}-2 : 0) / 2 ))"; if [[ $v == 0x* ]]; then record "$1.code_keccak" "$(cast keccak "$v")"; fi; }
+
+          record rpc_name "$RPC_NAME"
+          record chain_id "$(cast chain-id --rpc-url "$RPC_URL" 2>&1 || true)"
+          record head "$(cast block-number --rpc-url "$RPC_URL" 2>&1 || true)"
+          for pair in upgrade:$UPGRADE deployment:$DEPLOYMENT; do
+            kind=${pair%%:*}; safe=${pair#*:}
+            store "$kind.guard_slot" "$safe" "$GUARD_SLOT"
+            store "$kind.fallback_slot" "$safe" "$FALLBACK_SLOT"
+            call "$kind.masterCopy" "$safe" 'masterCopy()(address)'
+            call "$kind.owners" "$safe" 'getOwners()(address[])'
+            call "$kind.threshold" "$safe" 'getThreshold()(uint256)'
+            call "$kind.nonce" "$safe" 'nonce()(uint256)'
+            call "$kind.modules" "$safe" 'getModulesPaginated(address,uint256)(address[],address)' '0x0000000000000000000000000000000000000001 20'
+            code "$kind.safe" "$safe"
+          done
+          call module.safe "$MODULE" 'safe()(address)'
+          code module "$MODULE"
+          for addr in $CANDIDATES; do
+            safe=$(echo "$addr" | tr '[:upper:]' '[:lower:]')
+            code "candidate-$safe" "$addr"
+            call "candidate-$safe.safe" "$addr" 'safe()(address)'
+            call "candidate-$safe.delay" "$addr" 'delay()(uint24)'
+            call "candidate-$safe.lockedDownBy" "$addr" 'lockedDownBy()(address)'
+          done
+
+          python3 - "$OUT" <<'PY'
+          import json, pathlib, sys
+          root=pathlib.Path(sys.argv[1])
+          vals={}
+          for line in (root/'raw.tsv').read_text().splitlines():
+              k,v=line.split('\t',1); vals[k]=v
+          def addr_from_slot(v):
+              if isinstance(v,str) and v.startswith('0x') and len(v)>=42:
+                  return '0x'+v[-40:]
+              return None
+          result={'rpc_name':vals.get('rpc_name'),'values':vals,
+                  'upgrade_guard':addr_from_slot(vals.get('upgrade.guard_slot','')),
+                  'deployment_guard':addr_from_slot(vals.get('deployment.guard_slot','')),
+                  'upgrade_fallback':addr_from_slot(vals.get('upgrade.fallback_slot','')),
+                  'deployment_fallback':addr_from_slot(vals.get('deployment.fallback_slot',''))}
+          (root/'summary.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          if vals.get('chain_id')!='1': raise SystemExit('not Ethereum')
+          PY
+          find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+          test -s "$OUT/summary.json"
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: safeguard-runtime-${{ matrix.name }}-${{ github.run_id }}
+          path: safeguard-${{ matrix.name }}/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 9
