@@ -1,0 +1,104 @@
+name: Snapshot public 0x Deployer control state V2
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-deployer-control-state-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rpc:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: drpc, url: 'https://eth.drpc.org'}
+          - {name: blockscout, url: 'https://eth.blockscout.com/api/eth-rpc'}
+          - {name: llama, url: 'https://eth.llamarpc.com'}
+          - {name: mevblocker, url: 'https://rpc.mevblocker.io'}
+          - {name: onerpc, url: 'https://1rpc.io/eth'}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - name: Query one independent RPC
+        env:
+          RPC_NAME: ${{ matrix.name }}
+          RPC_URL: ${{ matrix.url }}
+        shell: bash
+        run: |
+          set -u
+          OUT="$GITHUB_WORKSPACE/state-$RPC_NAME"
+          mkdir -p "$OUT"
+          DEPLOYER=0x00000000000004533Fe15556B1E086BB1A72cEae
+          UPGRADE_SAFE=0xf36b9f50E59870A24F42F9Ba43b2aD0A4b8f2F51
+          DEPLOYMENT_SAFE=0x8E5DE7118a596E99B0563D3022039c11927f4827
+          MODULE=0x1CeC01DC0fFEE5eB5aF47DbEc1809F2A7c601C30
+          IMPL_SLOT=0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
+          VERSION_SLOT=0x4910fdfa16fed3260ed0e7147f7cc6da11a60208b5b9406d12a635614ffd9143
+          ADMIN_SLOT=0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103
+          PENDING_SLOT=0x6ed8ad4e485c433a46d43a225e2ebe6a14259468c9e0ee3a0c38eefca7d49f56
+          : > "$OUT/raw.tsv"
+          q() {
+            label=$1; shift
+            value=$("$@" 2>&1 || true)
+            value=${value//$'\n'/ }
+            printf '%s\t%s\n' "$label" "$value" >> "$OUT/raw.tsv"
+          }
+          q chain_id cast chain-id --rpc-url "$RPC_URL"
+          q head cast block-number --rpc-url "$RPC_URL"
+          q deployer.owner cast call "$DEPLOYER" 'owner()(address)' --rpc-url "$RPC_URL"
+          q deployer.pendingOwner cast call "$DEPLOYER" 'pendingOwner()(address)' --rpc-url "$RPC_URL"
+          q deployer.implementation cast call "$DEPLOYER" 'implementation()(address)' --rpc-url "$RPC_URL"
+          q deployer.version cast call "$DEPLOYER" 'version()(string)' --rpc-url "$RPC_URL"
+          q deployer.impl_slot cast storage "$DEPLOYER" "$IMPL_SLOT" --rpc-url "$RPC_URL"
+          q deployer.version_slot cast storage "$DEPLOYER" "$VERSION_SLOT" --rpc-url "$RPC_URL"
+          q deployer.admin_slot cast storage "$DEPLOYER" "$ADMIN_SLOT" --rpc-url "$RPC_URL"
+          q deployer.pending_slot cast storage "$DEPLOYER" "$PENDING_SLOT" --rpc-url "$RPC_URL"
+          q deployer.codehash cast codehash "$DEPLOYER" --rpc-url "$RPC_URL"
+          for feature in 2 3 4 5; do
+            q feature.$feature.authorized cast call "$DEPLOYER" 'authorized(uint128)(address,uint40)' "$feature" --rpc-url "$RPC_URL"
+            q feature.$feature.ownerOf cast call "$DEPLOYER" 'ownerOf(uint256)(address)' "$feature" --rpc-url "$RPC_URL"
+            q feature.$feature.prev cast call "$DEPLOYER" 'prev(uint128)(address)' "$feature" --rpc-url "$RPC_URL"
+            q feature.$feature.next cast call "$DEPLOYER" 'next(uint128)(address)' "$feature" --rpc-url "$RPC_URL"
+          done
+          for item in upgrade:$UPGRADE_SAFE deployment:$DEPLOYMENT_SAFE; do
+            kind=${item%%:*}; safe=${item#*:}
+            q safe.$kind.codehash cast codehash "$safe" --rpc-url "$RPC_URL"
+            q safe.$kind.owners cast call "$safe" 'getOwners()(address[])' --rpc-url "$RPC_URL"
+            q safe.$kind.threshold cast call "$safe" 'getThreshold()(uint256)' --rpc-url "$RPC_URL"
+            q safe.$kind.nonce cast call "$safe" 'nonce()(uint256)' --rpc-url "$RPC_URL"
+            q safe.$kind.guard cast call "$safe" 'getGuard()(address)' --rpc-url "$RPC_URL"
+            q safe.$kind.fallback cast call "$safe" 'getFallbackHandler()(address)' --rpc-url "$RPC_URL"
+            q safe.$kind.modules cast call "$safe" 'getModulesPaginated(address,uint256)(address[],address)' 0x0000000000000000000000000000000000000001 20 --rpc-url "$RPC_URL"
+            q safe.$kind.module_enabled cast call "$safe" 'isModuleEnabled(address)(bool)' "$MODULE" --rpc-url "$RPC_URL"
+          done
+          q module.codehash cast codehash "$MODULE" --rpc-url "$RPC_URL"
+          q module.safe cast call "$MODULE" 'safe()(address)' --rpc-url "$RPC_URL"
+          python3 - "$OUT" <<'PY'
+          import json, os, pathlib, sys
+          root=pathlib.Path(sys.argv[1])
+          data={}
+          for line in (root/'raw.tsv').read_text().splitlines():
+              label,value=line.split('\t',1)
+              data[label]=value
+          result={'rpc_name':os.environ['RPC_NAME'],'rpc_url':os.environ['RPC_URL'],'values':data}
+          (root/'summary.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({'rpc':os.environ['RPC_NAME'],'chain':data.get('chain_id'),'owner':data.get('deployer.owner'),'implementation':data.get('deployer.implementation'),'version':data.get('deployer.version')},sort_keys=True))
+          PY
+          find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+      - name: Upload RPC evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployer-control-${{ matrix.name }}-${{ github.run_id }}
+          path: state-${{ matrix.name }}/
+          if-no-files-found: warn
+          retention-days: 2
+          compression-level: 9
