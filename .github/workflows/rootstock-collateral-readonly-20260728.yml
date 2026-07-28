@@ -1,0 +1,157 @@
+name: Rootstock collateral read-only 20260728
+
+on:
+  push:
+    branches:
+      - research/rootstock-collateral-readonly-20260728
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read current Rootstock collateral state
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/rootstock-collateral-readonly"
+          RPC="https://public-node.rsk.co"
+          COLLATERAL="0xBe4D93B3aFD9921CAC66704fFD3Caf662886fb73"
+          PEGOUT="0x9A0678742cfb567874eb4e99Df2106BDED78F5E4"
+          DEFAULT_PROVIDER="0x4202bAC9919C3412Fc7c8BE4e678e26279386603"
+          TEKS_PROVIDER="0x82a06eBDB97776a2da4041dF8f2b2ea8D3257852"
+          mkdir -p "$OUT"
+
+          rpc() {
+            local name="$1"
+            local payload="$2"
+            curl --fail --silent --show-error --location \
+              --connect-timeout 15 --max-time 60 --retry 3 --retry-all-errors \
+              -H 'content-type: application/json' --data "$payload" "$RPC" \
+              | tee "$OUT/$name.json"
+            printf '\n'
+          }
+
+          eth_call() {
+            local name="$1"
+            local to="$2"
+            local data="$3"
+            rpc "$name" "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"eth_call\",\"params\":[{\"to\":\"$to\",\"data\":\"$data\"},\"latest\"]}"
+          }
+
+          address_arg() {
+            local addr="${1#0x}"
+            printf '%064s' "$addr" | tr ' ' '0'
+          }
+
+          provider_type_and_address_args() {
+            local provider_type="$1"
+            local addr="${2#0x}"
+            printf '%064x%064s' "$provider_type" "$addr" | tr ' ' '0'
+          }
+
+          rpc chain_id '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}'
+          rpc block_number '{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}'
+          rpc gas_price '{"jsonrpc":"2.0","id":3,"method":"eth_gasPrice","params":[]}'
+          rpc collateral_balance "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"eth_getBalance\",\"params\":[\"$COLLATERAL\",\"latest\"]}"
+          rpc pegout_balance "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"eth_getBalance\",\"params\":[\"$PEGOUT\",\"latest\"]}"
+
+          eth_call min_collateral "$COLLATERAL" 0xe830b690
+          eth_call reward_percentage "$COLLATERAL" 0xc7213163
+          eth_call resign_delay_blocks "$COLLATERAL" 0x27887ffc
+
+          for spec in "default:$DEFAULT_PROVIDER" "teks:$TEKS_PROVIDER"; do
+            name="${spec%%:*}"
+            addr="${spec#*:}"
+            arg="$(address_arg "$addr")"
+            typed_arg="$(provider_type_and_address_args 1 "$addr")"
+            eth_call "${name}_pegout_collateral" "$COLLATERAL" "0x82b90e93${arg}"
+            eth_call "${name}_resignation_block" "$COLLATERAL" "0xd36933d3${arg}"
+            eth_call "${name}_pegout_sufficient" "$COLLATERAL" "0x718c5aa8${typed_arg}"
+            rpc "${name}_balance" "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"eth_getBalance\",\"params\":[\"$addr\",\"latest\"]}"
+          done
+
+          python3 - "$OUT" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          out = pathlib.Path(sys.argv[1])
+          names = [
+              "chain_id", "block_number", "gas_price", "collateral_balance", "pegout_balance",
+              "min_collateral", "reward_percentage", "resign_delay_blocks",
+              "default_pegout_collateral", "default_resignation_block", "default_pegout_sufficient", "default_balance",
+              "teks_pegout_collateral", "teks_resignation_block", "teks_pegout_sufficient", "teks_balance",
+          ]
+
+          values = {}
+          for name in names:
+              obj = json.loads((out / f"{name}.json").read_text())
+              if obj.get("error"):
+                  raise SystemExit(f"{name}: {obj['error']}")
+              raw = obj.get("result")
+              if not isinstance(raw, str) or not raw.startswith("0x"):
+                  raise SystemExit(f"{name}: invalid result {raw!r}")
+              values[name] = int(raw, 16)
+
+          penalty_fee = 10_000_000_000_000
+          reward = penalty_fee * values["reward_percentage"] // 10_000
+          lines = [
+              f"chain_id={values['chain_id']}",
+              f"block_number={values['block_number']}",
+              f"gas_price_wei={values['gas_price']}",
+              f"collateral_contract_balance_wei={values['collateral_balance']}",
+              f"pegout_contract_balance_wei={values['pegout_balance']}",
+              f"min_collateral_wei={values['min_collateral']}",
+              f"min_collateral_rbtc={values['min_collateral'] / 1e18:.18f}",
+              f"reward_percentage_bps={values['reward_percentage']}",
+              f"reward_percentage_percent={values['reward_percentage'] / 100:.2f}",
+              f"resign_delay_blocks={values['resign_delay_blocks']}",
+              f"historical_penalty_fee_wei={penalty_fee}",
+              f"historical_penalty_fee_rbtc={penalty_fee / 1e18:.8f}",
+              f"attacker_reward_per_quote_wei={reward}",
+              f"attacker_reward_per_quote_rbtc={reward / 1e18:.18f}",
+          ]
+
+          for name in ("default", "teks"):
+              collateral = values[f"{name}_pegout_collateral"]
+              minimum = values["min_collateral"]
+              to_below = ((collateral - minimum) // penalty_fee + 1) if collateral >= minimum else 0
+              to_zero = (collateral + penalty_fee - 1) // penalty_fee
+              lines += [
+                  f"{name}_pegout_collateral_wei={collateral}",
+                  f"{name}_pegout_collateral_rbtc={collateral / 1e18:.18f}",
+                  f"{name}_resignation_block={values[f'{name}_resignation_block']}",
+                  f"{name}_pegout_sufficient={bool(values[f'{name}_pegout_sufficient'])}",
+                  f"{name}_wallet_balance_wei={values[f'{name}_balance']}",
+                  f"{name}_quotes_to_below_min={to_below}",
+                  f"{name}_quotes_to_zero={to_zero}",
+                  f"{name}_attacker_reward_to_below_min_wei={to_below * reward}",
+                  f"{name}_attacker_reward_to_below_min_rbtc={to_below * reward / 1e18:.18f}",
+              ]
+
+          (out / "SUMMARY.txt").write_text("\n".join(lines) + "\n")
+          (out / "VALUES.json").write_text(json.dumps(values, indent=2) + "\n")
+          print("\n".join(lines))
+          PY
+
+          {
+            echo "generated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "rpc=$RPC"
+            echo "mode=read-only eth_call/getBalance; no transaction or quote submitted"
+          } > "$OUT/MANIFEST.txt"
+          find "$OUT" -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS.txt"
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootstock-collateral-readonly-20260728
+          path: ${{ runner.temp }}/rootstock-collateral-readonly
+          if-no-files-found: error
+          retention-days: 3
