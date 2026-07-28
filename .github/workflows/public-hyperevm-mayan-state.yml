@@ -1,0 +1,99 @@
+name: Snapshot public HyperEVM Mayan integration state
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-hyperevm-mayan-state.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rpc:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: official, url: 'https://rpc.hyperliquid.xyz/evm'}
+          - {name: drpc, url: 'https://hyperliquid.drpc.org'}
+          - {name: onerpc, url: 'https://public.1rpc.io/hyperliquid'}
+          - {name: nodeflare, url: 'https://rpc.nodeflare.app/hl/public'}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - name: Query registry, BridgeSettler, and Mayan Forwarder
+        env:
+          RPC_NAME: ${{ matrix.name }}
+          RPC_URL: ${{ matrix.url }}
+        shell: bash
+        run: |
+          set -u
+          OUT="$GITHUB_WORKSPACE/hyperevm-$RPC_NAME"
+          mkdir -p "$OUT"
+          REGISTRY=0x00000000000004533Fe15556B1E086BB1A72cEae
+          FORWARDER=0x337685fdaB40D39bd02028545a4FfA7D287cC3E2
+          : > "$OUT/raw.tsv"
+          q() {
+            label=$1; shift
+            value=$("$@" 2>&1 || true)
+            value=${value//$'\n'/ }
+            printf '%s\t%s\n' "$label" "$value" >> "$OUT/raw.tsv"
+          }
+          q chain_id cast chain-id --rpc-url "$RPC_URL"
+          q head cast block-number --rpc-url "$RPC_URL"
+          q registry.codehash cast codehash "$REGISTRY" --rpc-url "$RPC_URL"
+          q registry.ownerOf5 cast call "$REGISTRY" 'ownerOf(uint256)(address)' 5 --rpc-url "$RPC_URL"
+          q registry.prev5 cast call "$REGISTRY" 'prev(uint128)(address)' 5 --rpc-url "$RPC_URL"
+          q registry.next5 cast call "$REGISTRY" 'next(uint128)(address)' 5 --rpc-url "$RPC_URL"
+          current=$(cast call "$REGISTRY" 'ownerOf(uint256)(address)' 5 --rpc-url "$RPC_URL" 2>/dev/null || true)
+          previous=$(cast call "$REGISTRY" 'prev(uint128)(address)' 5 --rpc-url "$RPC_URL" 2>/dev/null || true)
+          if [[ $current == 0x* ]]; then
+            q bridge.current.address printf '%s' "$current"
+            q bridge.current.codehash cast codehash "$current" --rpc-url "$RPC_URL"
+            q bridge.current.code cast code "$current" --rpc-url "$RPC_URL"
+            q bridge.current.eth_balance cast balance "$current" --rpc-url "$RPC_URL"
+          fi
+          if [[ $previous == 0x* ]]; then
+            q bridge.previous.address printf '%s' "$previous"
+            q bridge.previous.codehash cast codehash "$previous" --rpc-url "$RPC_URL"
+            q bridge.previous.code cast code "$previous" --rpc-url "$RPC_URL"
+            q bridge.previous.eth_balance cast balance "$previous" --rpc-url "$RPC_URL"
+          fi
+          q forwarder.codehash cast codehash "$FORWARDER" --rpc-url "$RPC_URL"
+          q forwarder.code cast code "$FORWARDER" --rpc-url "$RPC_URL"
+          q forwarder.guardian cast call "$FORWARDER" 'guardian()(address)' --rpc-url "$RPC_URL"
+          q forwarder.nextGuardian cast call "$FORWARDER" 'nextGuardian()(address)' --rpc-url "$RPC_URL"
+          python3 - "$OUT" <<'PY'
+          import json, os, pathlib, sys
+          root=pathlib.Path(sys.argv[1])
+          values={}
+          for line in (root/'raw.tsv').read_text().splitlines():
+              label,value=line.split('\t',1)
+              if label.endswith('.code') and value.startswith('0x'):
+                  (root/(label.replace('.','-')+'.hex')).write_text(value+'\n')
+                  values[label]={'bytes':max(0,(len(value)-2)//2),'kept_in_separate_file':True}
+              else:
+                  values[label]=value
+          result={'rpc_name':os.environ['RPC_NAME'],'rpc_url':os.environ['RPC_URL'],'values':values}
+          (root/'summary.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({'rpc':os.environ['RPC_NAME'],'chain':values.get('chain_id'),'current':values.get('registry.ownerOf5'),'current_codehash':values.get('bridge.current.codehash'),'forwarder_codehash':values.get('forwarder.codehash'),'forwarder_bytes':values.get('forwarder.code',{}).get('bytes') if isinstance(values.get('forwarder.code'),dict) else None},sort_keys=True))
+          PY
+          curl -fsSL --retry 3 --max-time 45 "https://www.hyperscan.com/api/v2/smart-contracts/$FORWARDER" > "$OUT/hyperscan-forwarder.json" || true
+          if [[ $current == 0x* ]]; then
+            curl -fsSL --retry 3 --max-time 45 "https://www.hyperscan.com/api/v2/smart-contracts/$current" > "$OUT/hyperscan-current-bridge.json" || true
+          fi
+          find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+      - name: Upload HyperEVM evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hyperevm-mayan-${{ matrix.name }}-${{ github.run_id }}
+          path: hyperevm-${{ matrix.name }}/
+          if-no-files-found: warn
+          retention-days: 2
+          compression-level: 9
