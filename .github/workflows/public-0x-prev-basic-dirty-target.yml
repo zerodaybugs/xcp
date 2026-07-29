@@ -1,0 +1,70 @@
+name: Public 0x active-prev BASIC dirty-target gate
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-0x-prev-basic-dirty-target.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  basic-regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: feature234-prev
+            ref: 340ffbb23734843f6a569ba14360e9088009cc8c
+          - label: feature5-prev
+            ref: 111afe09957db8d0d895c6df64ee4c97077ef450
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xProject/0x-settler
+          ref: ${{ matrix.ref }}
+          submodules: recursive
+          fetch-depth: 1
+          path: old
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xProject/0x-settler
+          ref: 2bad36e7a9dc9660f52c7756d54ae7627f82e0f9
+          submodules: false
+          fetch-depth: 1
+          path: latest
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - name: Run native and latest BASIC restricted-target regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          OUT="$GITHUB_WORKSPACE/basic-dirty-${{ matrix.label }}"
+          mkdir -p "$OUT"
+          cd old
+          git rev-parse HEAD > "$OUT/SOURCE_COMMIT.txt"
+          FOUNDRY_FUZZ_RUNS=100000 forge test --match-path 'test/unit/core/BasicUnitTest.t.sol' -vvv 2>&1 | tee "$OUT/OLD_NATIVE_BASIC.log"
+          native_status=${PIPESTATUS[0]}
+          cp ../latest/test/unit/core/BasicUnitTest.t.sol test/unit/core/BasicLatestRegression.t.sol
+          FOUNDRY_FUZZ_RUNS=100000 forge test --match-path 'test/unit/core/BasicLatestRegression.t.sol' -vvv 2>&1 | tee "$OUT/LATEST_BACKPORT_BASIC.log"
+          backport_status=${PIPESTATUS[0]}
+          printf 'native=%s\nbackport=%s\n' "$native_status" "$backport_status" > "$OUT/EXIT_CODES.txt"
+          cp test/unit/core/BasicLatestRegression.t.sol "$OUT/"
+          find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+          test "$native_status" -eq 0
+          exit "$backport_status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 0x-basic-dirty-${{ matrix.label }}-${{ github.run_id }}
+          path: basic-dirty-${{ matrix.label }}/
+          if-no-files-found: warn
+          retention-days: 2
+          compression-level: 9
