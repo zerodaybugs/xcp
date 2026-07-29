@@ -1,0 +1,114 @@
+name: Public read-only 0x new UniV3 forks gate
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-0x-new-univ3-forks-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-and-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xProject/0x-settler
+          ref: 2bad36e7a9dc9660f52c7756d54ae7627f82e0f9
+          submodules: recursive
+          fetch-depth: 1
+          path: settler
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - name: Inventory new fork constants and chain dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/new-univ3-forks"
+          mkdir -p "$OUT"
+          cd settler
+          for f in src/core/univ3forks/SquadSwapV3.sol src/core/univ3forks/PrjxV3.sol; do
+            test -s "$f"
+            cp "$f" "$OUT/$(basename "$f")"
+            grep -R -n "$(basename "$f" .sol)" src/chains src/core test > "$OUT/$(basename "$f" .sol)-references.txt" || true
+          done
+          python3 - "$OUT" <<'PY'
+          import json, pathlib, re, sys
+          root=pathlib.Path(sys.argv[1])
+          result={}
+          ids=[]
+          for p in sorted(root.glob('*.sol')):
+              s=p.read_text()
+              addresses=sorted(set(re.findall(r'0x[a-fA-F0-9]{40}',s)))
+              hashes=sorted(set(re.findall(r'0x[a-fA-F0-9]{64}',s)))
+              fork_ids=[int(x,0) for x in re.findall(r'(?i)fork(?:Id|_ID)?\s*=\s*(0x[0-9a-fA-F]+|\d+)',s)]
+              ids.extend(fork_ids)
+              result[p.name]={
+                'addresses':addresses,
+                'hashes':hashes,
+                'fork_ids':fork_ids,
+                'has_zero_hash':any(int(x,16)==0 for x in hashes),
+              }
+          if ids and len(ids)!=len(set(ids)):
+              raise SystemExit(f'duplicate fork ids in target set: {ids}')
+          for name,v in result.items():
+              if not v['addresses'] or not v['hashes'] or v['has_zero_hash']:
+                  raise SystemExit(f'incomplete constants for {name}: {v}')
+          (root/'constants.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          PY
+          forge fmt --check
+          FOUNDRY_FUZZ_RUNS=10000 forge test --match-path 'test/unit/core/UniswapV3UnitTest.t.sol' -vvv 2>&1 | tee "$OUT/UNIV3_UNIT_FULL.log"
+          grep -q '0 failed' "$OUT/UNIV3_UNIT_FULL.log"
+          find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 0x-new-univ3-source-unit-${{ github.run_id }}
+          path: new-univ3-forks/
+          if-no-files-found: error
+          retention-days: 2
+
+  bnb-squadswap-fork:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BNB_MAINNET_RPC_URL: https://bsc-dataseed.binance.org
+      MAINNET_RPC_URL: https://eth.drpc.org
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xProject/0x-settler
+          ref: 2bad36e7a9dc9660f52c7756d54ae7627f82e0f9
+          submodules: recursive
+          fetch-depth: 1
+          path: settler
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - name: Run upstream SquadSwapV3 integration tests
+        shell: bash
+        run: |
+          set -o pipefail
+          OUT="$GITHUB_WORKSPACE/squadswap-fork"
+          mkdir -p "$OUT"
+          cd settler
+          test -s test/integration/SquadSwapV3.t.sol
+          forge test --profile integration --match-path 'test/integration/SquadSwapV3.t.sol' -vvv 2>&1 | tee "$OUT/FORGE_TEST_FULL.log"
+          cp test/integration/SquadSwapV3.t.sol "$OUT/"
+          git rev-parse HEAD > "$OUT/SOURCE_COMMIT.txt"
+          forge --version > "$OUT/FOUNDRY_VERSION.txt"
+          grep -q '0 failed' "$OUT/FORGE_TEST_FULL.log"
+          find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 0x-squadswap-fork-${{ github.run_id }}
+          path: squadswap-fork/
+          if-no-files-found: warn
+          retention-days: 2
