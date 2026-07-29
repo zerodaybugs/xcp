@@ -1,0 +1,232 @@
+name: Census public 0x current and previous deployment commits
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-0x-current-prev-commit-census.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        include:
+          - {name: mainnet, chain_id: 1, rpcs: 'https://eth.drpc.org|https://ethereum-rpc.publicnode.com'}
+          - {name: polygon, chain_id: 137, rpcs: 'https://polygon.drpc.org|https://polygon-bor-rpc.publicnode.com|https://polygon-rpc.com'}
+          - {name: base, chain_id: 8453, rpcs: 'https://base.drpc.org|https://base-rpc.publicnode.com|https://mainnet.base.org'}
+          - {name: optimism, chain_id: 10, rpcs: 'https://optimism.drpc.org|https://optimism-rpc.publicnode.com|https://mainnet.optimism.io'}
+          - {name: arbitrum, chain_id: 42161, rpcs: 'https://arbitrum.drpc.org|https://arbitrum-one-rpc.publicnode.com|https://arb1.arbitrum.io/rpc'}
+          - {name: bsc, chain_id: 56, rpcs: 'https://bsc.drpc.org|https://bsc-rpc.publicnode.com|https://bsc-dataseed.binance.org'}
+          - {name: avalanche, chain_id: 43114, rpcs: 'https://avalanche.drpc.org|https://avalanche-c-chain-rpc.publicnode.com|https://api.avax.network/ext/bc/C/rpc'}
+          - {name: linea, chain_id: 59144, rpcs: 'https://linea.drpc.org|https://linea-rpc.publicnode.com|https://rpc.linea.build'}
+          - {name: scroll, chain_id: 534352, rpcs: 'https://scroll.drpc.org|https://scroll-rpc.publicnode.com|https://rpc.scroll.io'}
+          - {name: mantle, chain_id: 5000, rpcs: 'https://mantle.drpc.org|https://mantle-rpc.publicnode.com|https://rpc.mantle.xyz'}
+          - {name: mode, chain_id: 34443, rpcs: 'https://mode.drpc.org|https://mainnet.mode.network'}
+          - {name: world, chain_id: 480, rpcs: 'https://worldchain.drpc.org|https://worldchain-mainnet.g.alchemy.com/public'}
+          - {name: sonic, chain_id: 146, rpcs: 'https://sonic.drpc.org|https://sonic-rpc.publicnode.com|https://rpc.soniclabs.com'}
+          - {name: ink, chain_id: 57073, rpcs: 'https://ink.drpc.org|https://rpc-qnd.inkonchain.com|https://rpc-gel.inkonchain.com'}
+          - {name: unichain, chain_id: 130, rpcs: 'https://unichain.drpc.org|https://unichain-rpc.publicnode.com|https://mainnet.unichain.org'}
+          - {name: berachain, chain_id: 80094, rpcs: 'https://berachain.drpc.org|https://berachain-rpc.publicnode.com|https://rpc.berachain.com'}
+          - {name: hyperevm, chain_id: 999, rpcs: 'https://hyperliquid.drpc.org|https://rpc.hyperliquid.xyz/evm'}
+          - {name: katana, chain_id: 747474, rpcs: 'https://katana.drpc.org|https://rpc.katana.network'}
+          - {name: plasma, chain_id: 9745, rpcs: 'https://plasma.drpc.org|https://rpc.plasma.to'}
+          - {name: monad, chain_id: 143, rpcs: 'https://monad.drpc.org|https://rpc.monad.xyz'}
+          - {name: abstract, chain_id: 2741, rpcs: 'https://abstract.drpc.org|https://api.mainnet.abs.xyz'}
+          - {name: tempo, chain_id: 4217, rpcs: 'https://tempo.drpc.org|https://rpc.tempo.xyz'}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Query registry and deployment GitCommit events
+        env:
+          CHAIN_NAME: ${{ matrix.name }}
+          EXPECTED_CHAIN_ID: ${{ matrix.chain_id }}
+          RPCS: ${{ matrix.rpcs }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/census-$CHAIN_NAME"
+          mkdir -p "$OUT"
+          python3 - "$OUT" <<'PY'
+          import hashlib, json, os, pathlib, time, urllib.request
+
+          out = pathlib.Path(__import__('sys').argv[1])
+          chain_name = os.environ['CHAIN_NAME']
+          expected_chain_id = int(os.environ['EXPECTED_CHAIN_ID'])
+          candidates = os.environ['RPCS'].split('|')
+          registry = '0x00000000000004533Fe15556B1E086BB1A72cEae'
+          git_commit_topic = '0x16fbd3a71aa6d159973eb9ff1e1199f9fe242767e6f30ac662a492f92ac70411'
+          owner_of_selector = '6352211e'
+          prev_selector = 'e2603dc2'
+          request_id = 0
+
+          def rpc(url, method, params, timeout=45, attempts=3):
+              global request_id
+              last = None
+              for attempt in range(attempts):
+                  request_id += 1
+                  body = json.dumps({'jsonrpc':'2.0','id':request_id,'method':method,'params':params}).encode()
+                  req = urllib.request.Request(url, data=body, headers={'Content-Type':'application/json','User-Agent':'0x-public-readonly-census'})
+                  try:
+                      with urllib.request.urlopen(req, timeout=timeout) as response:
+                          obj = json.load(response)
+                      if obj.get('error') is not None:
+                          raise RuntimeError(json.dumps(obj['error'], sort_keys=True))
+                      return obj['result']
+                  except Exception as exc:
+                      last = exc
+                      time.sleep(1.5 * (attempt + 1))
+              raise RuntimeError(f'{method}: {last!r}')
+
+          probes = []
+          selected = None
+          for url in candidates:
+              try:
+                  cid = int(rpc(url, 'eth_chainId', []), 16)
+                  head = int(rpc(url, 'eth_blockNumber', []), 16)
+                  probes.append({'url':url,'chain_id':cid,'head':head,'ok':cid == expected_chain_id})
+                  if cid == expected_chain_id and selected is None:
+                      selected = (url, head)
+              except Exception as exc:
+                  probes.append({'url':url,'ok':False,'error':repr(exc)})
+          (out/'rpc-probes.json').write_text(json.dumps(probes, indent=2, sort_keys=True)+'\n')
+          if selected is None:
+              (out/'result.json').write_text(json.dumps({'chain':chain_name,'chain_id':expected_chain_id,'status':'NO_WORKING_RPC','probes':probes},indent=2,sort_keys=True)+'\n')
+              raise SystemExit(0)
+          url, head = selected
+
+          def encode_uint(selector, value):
+              return '0x' + selector + value.to_bytes(32, 'big').hex()
+
+          def eth_call(to, data):
+              return rpc(url, 'eth_call', [{'to':to,'data':data}, 'latest'])
+
+          def decode_address(raw):
+              if not isinstance(raw, str) or len(raw) < 42:
+                  return None
+              return '0x' + raw[-40:]
+
+          def code_at(address, block='latest'):
+              return rpc(url, 'eth_getCode', [address, block])
+
+          def direct_commit_logs(address):
+              return rpc(url, 'eth_getLogs', [{
+                  'address': address,
+                  'fromBlock': '0x0',
+                  'toBlock': 'latest',
+                  'topics': [git_commit_topic],
+              }], timeout=75, attempts=2)
+
+          def first_code_block(address):
+              # Archive-RPC fallback: binary-search the first block with code.
+              try:
+                  if code_at(address, hex(head)) in ('0x', '0x0'):
+                      return None, 'NO_CODE_AT_HEAD'
+                  low, high = 0, head
+                  while low < high:
+                      mid = (low + high) // 2
+                      code = code_at(address, hex(mid))
+                      if code in ('0x', '0x0'):
+                          low = mid + 1
+                      else:
+                          high = mid
+                  return low, None
+              except Exception as exc:
+                  return None, repr(exc)
+
+          def commit_logs(address):
+              try:
+                  logs = direct_commit_logs(address)
+                  return logs, {'method':'full_range_address_filter'}
+              except Exception as full_exc:
+                  first, archive_error = first_code_block(address)
+                  if first is not None:
+                      start, end = max(0, first - 2), min(head, first + 2)
+                      try:
+                          logs = rpc(url, 'eth_getLogs', [{
+                              'address':address,
+                              'fromBlock':hex(start),
+                              'toBlock':hex(end),
+                              'topics':[git_commit_topic],
+                          }])
+                          return logs, {'method':'archive_binary_search','first_code_block':first}
+                      except Exception as exact_exc:
+                          return [], {'method':'failed','full_error':repr(full_exc),'archive_error':archive_error,'exact_error':repr(exact_exc)}
+                  return [], {'method':'failed','full_error':repr(full_exc),'archive_error':archive_error}
+
+          result = {
+              'chain': chain_name,
+              'chain_id': expected_chain_id,
+              'rpc': url,
+              'head': head,
+              'registry': registry,
+              'features': {},
+              'status': 'OK',
+          }
+          for feature in (2,3,4,5):
+              entry = {}
+              try:
+                  entry['current'] = decode_address(eth_call(registry, encode_uint(owner_of_selector, feature)))
+              except Exception as exc:
+                  entry['current_error'] = repr(exc)
+              try:
+                  entry['prev'] = decode_address(eth_call(registry, encode_uint(prev_selector, feature)))
+              except Exception as exc:
+                  entry['prev_error'] = repr(exc)
+              for label in ('current','prev'):
+                  address = entry.get(label)
+                  if not address or int(address,16) == 0:
+                      continue
+                  detail = {'address':address}
+                  try:
+                      code = code_at(address)
+                      detail['runtime_bytes'] = max(0, (len(code)-2)//2)
+                      detail['runtime_sha256'] = hashlib.sha256(bytes.fromhex(code[2:])).hexdigest() if code.startswith('0x') else None
+                  except Exception as exc:
+                      detail['code_error'] = repr(exc)
+                  logs, discovery = commit_logs(address)
+                  detail['log_discovery'] = discovery
+                  detail['git_commit_logs'] = logs
+                  commits = []
+                  for log in logs:
+                      topics = log.get('topics') or []
+                      if len(topics) > 1 and isinstance(topics[1], str):
+                          word = topics[1][2:].lower().ljust(64,'0')[:64]
+                          commits.append({
+                              'topic1':topics[1],
+                              'first20':'0x'+word[:40],
+                              'last20':'0x'+word[-40:],
+                              'block':int(log.get('blockNumber','0x0'),16),
+                              'tx_hash':log.get('transactionHash'),
+                          })
+                  detail['commit_candidates'] = commits
+                  entry[label+'_detail'] = detail
+              result['features'][str(feature)] = entry
+
+          (out/'result.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          lines=['feature\tslot\taddress\truntime_bytes\tcommit_first20\tblock\tdiscovery']
+          for feature, entry in result['features'].items():
+              for label in ('current','prev'):
+                  detail=entry.get(label+'_detail')
+                  if not detail: continue
+                  commits=detail.get('commit_candidates') or [{}]
+                  first=commits[0]
+                  lines.append('\t'.join(map(str,[feature,label,detail.get('address',''),detail.get('runtime_bytes',''),first.get('first20',''),first.get('block',''),detail.get('log_discovery',{}).get('method','')])))
+          (out/'summary.tsv').write_text('\n'.join(lines)+'\n')
+          PY
+          find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+
+      - name: Upload public census evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 0x-deployment-census-${{ matrix.name }}-${{ github.run_id }}
+          path: census-${{ matrix.name }}/
+          if-no-files-found: warn
+          retention-days: 3
+          compression-level: 9
