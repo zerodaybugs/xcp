@@ -1,0 +1,66 @@
+name: Public 0x active-prev RFQ regression gate
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-0x-prev-rfq-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rfq-prev:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      MAINNET_RPC_URL: https://eth.drpc.org
+    steps:
+      - name: Checkout active previous source
+        uses: actions/checkout@v4
+        with:
+          repository: 0xProject/0x-settler
+          ref: 340ffbb23734843f6a569ba14360e9088009cc8c
+          submodules: recursive
+          fetch-depth: 1
+          path: old
+          persist-credentials: false
+      - name: Checkout latest public tests
+        uses: actions/checkout@v4
+        with:
+          repository: 0xProject/0x-settler
+          ref: 2bad36e7a9dc9660f52c7756d54ae7627f82e0f9
+          submodules: false
+          fetch-depth: 1
+          path: latest
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - name: Run native old RFQ suite and latest regression backport
+        shell: bash
+        run: |
+          set -o pipefail
+          OUT="$GITHUB_WORKSPACE/rfq-prev"
+          mkdir -p "$OUT"
+          cd old
+          git rev-parse HEAD > "$OUT/SOURCE_COMMIT.txt"
+          FOUNDRY_FUZZ_RUNS=100000 forge test --match-path 'test/unit/core/RfqUnitTest.t.sol' -vvv 2>&1 | tee "$OUT/OLD_NATIVE_RFQ.log"
+          native_status=${PIPESTATUS[0]}
+          cp ../latest/test/unit/core/RfqUnitTest.t.sol test/unit/core/RfqLatestRegression.t.sol
+          FOUNDRY_FUZZ_RUNS=100000 forge test --match-path 'test/unit/core/RfqLatestRegression.t.sol' -vvv 2>&1 | tee "$OUT/LATEST_BACKPORT_RFQ.log"
+          backport_status=${PIPESTATUS[0]}
+          printf 'native=%s\nbackport=%s\n' "$native_status" "$backport_status" > "$OUT/EXIT_CODES.txt"
+          cp test/unit/core/RfqLatestRegression.t.sol "$OUT/"
+          find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+          test "$native_status" -eq 0
+          exit "$backport_status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 0x-active-prev-rfq-${{ github.run_id }}
+          path: rfq-prev/
+          if-no-files-found: warn
+          retention-days: 2
+          compression-level: 9
