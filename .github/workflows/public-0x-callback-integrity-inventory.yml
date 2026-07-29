@@ -1,0 +1,111 @@
+name: Public read-only 0x callback integrity inventory
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/public-0x-callback-integrity-inventory.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact public 0x source
+        uses: actions/checkout@v4
+        with:
+          repository: 0xProject/0x-settler
+          ref: 2bad36e7a9dc9660f52c7756d54ae7627f82e0f9
+          fetch-depth: 1
+          submodules: false
+          persist-credentials: false
+          path: settler
+
+      - name: Build callback trust and data-integrity inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/callback-integrity"
+          mkdir -p "$OUT"
+          python3 - "$GITHUB_WORKSPACE/settler" "$OUT" <<'PY'
+          import ast, hashlib, json, pathlib, re, sys
+          root=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          calls=[]
+          patterns=(
+              '_setOperatorAndCall', 'setOperatorAndCallback', 'getAndClearCallback',
+              'callback', 'Callback', 'permit2Data', 'payer', 'initHash', 'factory',
+              'deriveDeterministicContract', 'codehash', 'extcodehash'
+          )
+          for p in sorted((root/'src').rglob('*.sol')):
+              text=p.read_text(errors='replace'); lines=text.splitlines()
+              for i,line in enumerate(lines,1):
+                  if '_setOperatorAndCall' in line or 'setOperatorAndCallback' in line:
+                      lo=max(1,i-45); hi=min(len(lines),i+55)
+                      snippet='\n'.join(f'{j:05d}: {lines[j-1]}' for j in range(lo,hi+1))
+                      calls.append({
+                          'file':str(p.relative_to(root)), 'line':i,
+                          'call_line':line.strip(), 'snippet':snippet,
+                          'has_address_derivation': 'deriveDeterministicContract' in snippet,
+                          'has_factory': bool(re.search(r'factory|deployer|initHash|codehash|extcodehash',snippet,re.I)),
+                          'mentions_unmodified': 'unmodified' in snippet.lower(),
+                          'mentions_permit': 'permit' in snippet.lower(),
+                          'mentions_payer': 'payer' in snippet.lower(),
+                      })
+          # callback entrypoints and all target-computation helpers
+          callback_entries=[]
+          for p in sorted((root/'src').rglob('*.sol')):
+              text=p.read_text(errors='replace'); lines=text.splitlines()
+              for i,line in enumerate(lines,1):
+                  if re.search(r'function\s+\w*(callback|Callback|Call)\w*\s*\(',line):
+                      lo=max(1,i-20); hi=min(len(lines),i+45)
+                      callback_entries.append({
+                          'file':str(p.relative_to(root)), 'line':i,
+                          'signature':line.strip(),
+                          'snippet':'\n'.join(f'{j:05d}: {lines[j-1]}' for j in range(lo,hi+1)),
+                      })
+          # risk ranking is intentionally conservative; it is an inventory, not a vulnerability verdict.
+          for c in calls:
+              score=0
+              if c['mentions_permit']: score+=4
+              if c['mentions_payer']: score+=3
+              if not c['has_address_derivation']: score+=3
+              if not c['has_factory']: score+=2
+              if not c['mentions_unmodified']: score+=1
+              c['review_priority']=score
+          calls.sort(key=lambda x:(-x['review_priority'],x['file'],x['line']))
+          result={
+              'source_commit':'2bad36e7a9dc9660f52c7756d54ae7627f82e0f9',
+              'operator_call_sites':calls,
+              'callback_entries':callback_entries,
+              'counts':{
+                  'operator_call_sites':len(calls),
+                  'callback_entries':len(callback_entries),
+                  'high_priority':sum(c['review_priority']>=7 for c in calls),
+              },
+          }
+          (out/'inventory.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          md=['# 0x callback-integrity inventory','',f"Source: `{result['source_commit']}`",'']
+          md += [f"- operator call sites: {len(calls)}",f"- callback entries: {len(callback_entries)}",f"- high-priority manual-review sites: {result['counts']['high_priority']}",'']
+          for c in calls:
+              md += [f"## {c['file']}:{c['line']} — priority {c['review_priority']}",'```solidity',c['snippet'],'```','']
+          (out/'CALL_SITES.md').write_text('\n'.join(md))
+          for p in sorted((root/'src').rglob('*.sol')):
+              rel=str(p.relative_to(root)).replace('/','__')
+              if any(x in p.read_text(errors='replace') for x in patterns):
+                  (out/f'source__{rel}').write_text(p.read_text(errors='replace'))
+          PY
+          find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS"
+          test -s "$OUT/inventory.json"
+
+      - name: Upload public inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: 0x-callback-integrity-${{ github.run_id }}
+          path: callback-integrity/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 9
