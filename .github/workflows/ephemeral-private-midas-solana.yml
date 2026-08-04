@@ -1,0 +1,185 @@
+name: Ephemeral encrypted Midas Solana gate
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/ephemeral-private-midas-solana.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  encrypted-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out transport definition
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Create one-run input certificate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          mkdir -p public-handshake /tmp/midas-input /tmp/midas-result
+          openssl req -x509 -newkey rsa:4096 -nodes -sha256 -days 1 \
+            -subj "/CN=midas-solana-input-${GITHUB_RUN_ID}" \
+            -keyout /tmp/midas-input/private.pem \
+            -out public-handshake/input_certificate.pem \
+            >/dev/null 2>&1
+          openssl x509 -in public-handshake/input_certificate.pem \
+            -noout -fingerprint -sha256 -subject -dates \
+            > public-handshake/INPUT_CERTIFICATE_METADATA.txt
+
+      - name: Publish one-run input certificate
+        uses: actions/upload-artifact@v4
+        with:
+          name: midas-solana-input-certificate-${{ github.run_id }}
+          path: public-handshake/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Receive integrity-bound ciphertext
+        id: inbox
+        shell: bash
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$HEAD_BRANCH"
+          inbox=".secure/midas-solana/inbox/${GITHUB_RUN_ID}"
+          remote='refs/remotes/midas-ciphertext/head'
+          found=false
+          for attempt in $(seq 1 1440); do
+            git fetch --quiet --no-tags --depth=1 \
+              "https://github.com/${REPOSITORY}.git" \
+              "+refs/heads/${HEAD_BRANCH}:${remote}" \
+              >/dev/null 2>&1 || true
+            if git show "${remote}:${inbox}/READY" > /tmp/midas-input/READY 2>/dev/null; then
+              mapfile -t parts < <(
+                git ls-tree -r --name-only "$remote" -- "$inbox" \
+                  | grep -E '/part-[0-9]{4}$' | sort
+              )
+              if test "${#parts[@]}" -gt 0; then
+                : > /tmp/midas-input/payload.cms.b64
+                for part in "${parts[@]}"; do
+                  git show "${remote}:${part}" >> /tmp/midas-input/payload.cms.b64
+                done
+                base64 --decode /tmp/midas-input/payload.cms.b64 \
+                  > /tmp/midas-input/payload.cms
+                expected="$(tr -d '[:space:]' < /tmp/midas-input/READY)"
+                actual="$(sha256sum /tmp/midas-input/payload.cms | awk '{print $1}')"
+                if test -s /tmp/midas-input/payload.cms && test "$actual" = "$expected"; then
+                  found=true
+                  break
+                fi
+              fi
+            fi
+            sleep 5
+          done
+          test "$found" = true
+          printf 'payload_received=true\n' >> "$GITHUB_OUTPUT"
+
+      - name: Decrypt and validate private payload
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          mkdir -p /tmp/midas-payload /tmp/midas-result
+          openssl cms -decrypt -binary -inform DER \
+            -in /tmp/midas-input/payload.cms \
+            -recip public-handshake/input_certificate.pem \
+            -inkey /tmp/midas-input/private.pem \
+            -out /tmp/midas-input/payload.tar \
+            >/dev/null 2>&1
+          python3 - <<'PY'
+          import pathlib, tarfile
+          src = pathlib.Path('/tmp/midas-input/payload.tar')
+          dst = pathlib.Path('/tmp/midas-payload')
+          with tarfile.open(src, 'r:*') as tf:
+              members = tf.getmembers()
+              if not members:
+                  raise SystemExit('empty payload')
+              for m in members:
+                  p = pathlib.PurePosixPath(m.name)
+                  if p.is_absolute() or '..' in p.parts or m.issym() or m.islnk() or m.isdev():
+                      raise SystemExit('unsafe payload member')
+              tf.extractall(dst, members=members, filter='data')
+          PY
+          test -f /tmp/midas-payload/MANIFEST.sha256
+          test -f /tmp/midas-payload/run.sh
+          test -f /tmp/midas-payload/result_cert.pem
+          (cd /tmp/midas-payload && sha256sum -c MANIFEST.sha256 \
+            > /tmp/midas-result/PAYLOAD_INTEGRITY.log 2>&1)
+          chmod 700 /tmp/midas-payload/run.sh
+
+      - name: Execute private Anchor and Bankrun payload
+        id: private_run
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          umask 077
+          mkdir -p /tmp/midas-payload/results /tmp/midas-result
+          (
+            cd /tmp/midas-payload
+            env PRIVATE_RUNNER_RESULTS=/tmp/midas-payload/results \
+              bash ./run.sh
+          ) > /tmp/midas-result/PRIVATE_RUN.log 2>&1
+          status=$?
+          printf '%s\n' "$status" > /tmp/midas-result/PRIVATE_RUN_STATUS.txt
+          printf 'status=%s\n' "$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Encrypt private output
+        if: always() && steps.inbox.outputs.payload_received == 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          mkdir -p /tmp/midas-result/bundle
+          test -f /tmp/midas-result/PRIVATE_RUN_STATUS.txt \
+            || printf '125\n' > /tmp/midas-result/PRIVATE_RUN_STATUS.txt
+          cp -a /tmp/midas-result/PRIVATE_RUN.log /tmp/midas-result/bundle/ 2>/dev/null || true
+          cp -a /tmp/midas-result/PRIVATE_RUN_STATUS.txt /tmp/midas-result/bundle/
+          cp -a /tmp/midas-result/PAYLOAD_INTEGRITY.log /tmp/midas-result/bundle/ 2>/dev/null || true
+          if test -d /tmp/midas-payload/results; then
+            cp -a /tmp/midas-payload/results/. /tmp/midas-result/bundle/
+          fi
+          (cd /tmp/midas-result/bundle && find . -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          tar -cf /tmp/midas-result/result.tar -C /tmp/midas-result/bundle .
+          openssl cms -encrypt -binary -aes256 -outform DER \
+            -in /tmp/midas-result/result.tar \
+            -out /tmp/midas-result/encrypted-result.cms \
+            /tmp/midas-payload/result_cert.pem \
+            >/dev/null 2>&1
+          sha256sum /tmp/midas-result/encrypted-result.cms \
+            > /tmp/midas-result/ENCRYPTED_RESULT_SHA256.txt
+          rm -rf /tmp/midas-payload /tmp/midas-input /tmp/midas-result/result.tar /tmp/midas-result/bundle
+
+      - name: Upload ciphertext result only
+        if: always() && steps.inbox.outputs.payload_received == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-midas-solana-result-${{ github.run_id }}
+          path: |
+            /tmp/midas-result/encrypted-result.cms
+            /tmp/midas-result/ENCRYPTED_RESULT_SHA256.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Enforce private result
+        if: always() && steps.inbox.outputs.payload_received == 'true'
+        shell: bash
+        env:
+          PRIVATE_STATUS: ${{ steps.private_run.outputs.status }}
+        run: |
+          set -Eeuo pipefail
+          test "$PRIVATE_STATUS" = '0'
