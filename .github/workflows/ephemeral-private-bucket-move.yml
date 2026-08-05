@@ -1,0 +1,67 @@
+name: Ephemeral encrypted Bucket Move validation
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/ephemeral-private-bucket-move.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  private-bucket-move:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out temporary validation branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Generate one-time input certificate
+        shell: bash
+        run: bash .github/scripts/ephemeral-private-bucket-move.sh prepare
+
+      - name: Publish one-time input certificate
+        uses: actions/upload-artifact@v4
+        with:
+          name: ephemeral-bucket-input-certificate-${{ github.run_id }}
+          path: |
+            bucket_public_metadata/input_certificate.pem
+            bucket_public_metadata/INPUT_CERTIFICATE_METADATA.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Receive, execute, and encrypt private payload
+        id: private_run
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          bash .github/scripts/ephemeral-private-bucket-move.sh run
+          status=$?
+          printf 'status=%s\n' "$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Upload encrypted private result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-private-bucket-result-${{ github.run_id }}
+          path: |
+            /tmp/private-bucket-result/encrypted-result.cms
+            /tmp/private-bucket-result/ENCRYPTED_RESULT_SHA256.txt
+            /tmp/private-bucket-result/RESULT_STATUS.txt
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Enforce private result after encrypted upload
+        if: always()
+        shell: bash
+        env:
+          PRIVATE_STATUS: ${{ steps.private_run.outputs.status }}
+        run: |
+          set -euo pipefail
+          test "$PRIVATE_STATUS" = '0'
