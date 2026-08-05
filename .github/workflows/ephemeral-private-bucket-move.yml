@@ -65,3 +65,5 @@ jobs:
         run: |
           set -euo pipefail
           test "$PRIVATE_STATUS" = '0'
+
+# Rerun v4: archive layout and ELF-based Sui CLI discovery.
