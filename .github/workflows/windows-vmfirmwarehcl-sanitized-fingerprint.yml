@@ -1,0 +1,130 @@
+name: Windows shipped OpenHCL sanitized fingerprint
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .github/workflows/windows-vmfirmwarehcl-sanitized-fingerprint.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fingerprint:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Install PE parser
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --no-input pefile
+
+      - name: Produce sanitized firmware fingerprints
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import hashlib
+          import json
+          import pathlib
+          import re
+          from datetime import datetime, timezone
+
+          import pefile
+
+          path = pathlib.Path(r'C:\Windows\System32\vmfirmwarehcl.dll')
+          if not path.exists():
+              raise SystemExit('vmfirmwarehcl.dll missing')
+          data = path.read_bytes()
+          pe = pefile.PE(data=data, fast_load=False)
+
+          def resource_name(entry):
+              return str(entry.name) if entry.name is not None else str(entry.struct.Id)
+
+          printable = re.compile(rb'[\x20-\x7e]{6,}')
+          utf16le = re.compile(rb'(?:[\x20-\x7e]\x00){6,}')
+          keywords = re.compile(
+              r'(openhcl|openvmm|underhill|microsoft|rustc|linux version|kernel|release|commit|build|git[-_ ]?[0-9a-f]{7,40}|[0-9a-f]{40})',
+              re.IGNORECASE,
+          )
+
+          records = []
+          image = pe.get_memory_mapped_image()
+          for type_entry in pe.DIRECTORY_ENTRY_RESOURCE.entries:
+              if resource_name(type_entry).upper() != 'VMFW':
+                  continue
+              for name_entry in type_entry.directory.entries:
+                  name = resource_name(name_entry)
+                  for lang_entry in name_entry.directory.entries:
+                      rva = int(lang_entry.data.struct.OffsetToData)
+                      size = int(lang_entry.data.struct.Size)
+                      blob = image[rva:rva + size]
+                      candidates = []
+                      for match in printable.finditer(blob):
+                          try:
+                              candidates.append(match.group().decode('ascii'))
+                          except UnicodeDecodeError:
+                              pass
+                      for match in utf16le.finditer(blob):
+                          try:
+                              candidates.append(match.group().decode('utf-16le'))
+                          except UnicodeDecodeError:
+                              pass
+                      selected = []
+                      seen = set()
+                      for value in candidates:
+                          value = value.strip()
+                          if len(value) > 512:
+                              value = value[:512]
+                          if keywords.search(value) and value not in seen:
+                              seen.add(value)
+                              selected.append(value)
+                      selected.sort()
+                      records.append({
+                          'resource_name': name,
+                          'lang': int(lang_entry.struct.Id),
+                          'size': size,
+                          'sha256': hashlib.sha256(blob).hexdigest(),
+                          'igvm_magic': blob[:4].hex(),
+                          'elf_offsets': [i for i in range(0, max(0, len(blob)-3)) if blob[i:i+4] == b'\x7fELF'][:32],
+                          'mz_offsets': [i for i in range(0, max(0, len(blob)-1)) if blob[i:i+2] == b'MZ'][:32],
+                          'keyword_strings': selected[:500],
+                      })
+
+          output = {
+              'schema': 'windows-shipped-openhcl-sanitized-fingerprint-v1',
+              'generated_utc': datetime.now(timezone.utc).isoformat(),
+              'dll_sha256': hashlib.sha256(data).hexdigest(),
+              'resource_count': len(records),
+              'records': records,
+          }
+          pathlib.Path('vmfirmwarehcl-sanitized-fingerprint.json').write_text(
+              json.dumps(output, indent=2), encoding='utf-8'
+          )
+          lines = [
+              f"dll_sha256={output['dll_sha256']}",
+              f"resource_count={len(records)}",
+          ]
+          for record in records:
+              lines.append(
+                  f"resource={record['resource_name']} size={record['size']} sha256={record['sha256']} "
+                  f"elf_offsets={record['elf_offsets']} mz_offsets={record['mz_offsets']} strings={len(record['keyword_strings'])}"
+              )
+              lines.extend('  ' + value for value in record['keyword_strings'][:80])
+          pathlib.Path('vmfirmwarehcl-sanitized-summary.txt').write_text(
+              '\n'.join(lines) + '\n', encoding='utf-8'
+          )
+          '@ | Set-Content -LiteralPath fingerprint.py -Encoding UTF8
+          python fingerprint.py
+          Get-Content vmfirmwarehcl-sanitized-summary.txt
+
+      - name: Upload sanitized metadata only
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-shipped-openhcl-sanitized-fingerprint
+          path: |
+            vmfirmwarehcl-sanitized-fingerprint.json
+            vmfirmwarehcl-sanitized-summary.txt
+          retention-days: 7
