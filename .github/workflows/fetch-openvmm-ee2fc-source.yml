@@ -1,0 +1,36 @@
+name: Fetch exact OpenVMM ee2fc source
+
+on:
+  push:
+    branches:
+      - tooling-rust-1-95-20260817
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download exact Microsoft OpenVMM source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit='ee2fc3ffe2a816135374921d34b2fdf2990fd072'
+          curl --fail --location --retry 5 \
+            --output "microsoft-openvmm-${commit}.tar.gz" \
+            "https://api.github.com/repos/microsoft/openvmm/tarball/${commit}"
+          sha256sum "microsoft-openvmm-${commit}.tar.gz" > SOURCE_SHA256.txt
+          tar -tzf "microsoft-openvmm-${commit}.tar.gz" | head -n 20 > ARCHIVE_SAMPLE.txt
+      - name: Upload exact source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: microsoft-openvmm-ee2fc3-source
+          path: |
+            microsoft-openvmm-ee2fc3ffe2a816135374921d34b2fdf2990fd072.tar.gz
+            SOURCE_SHA256.txt
+            ARCHIVE_SAMPLE.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
