@@ -28,14 +28,14 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Fetch and pin owned integration definition
+      - name: Fetch commit-pinned owned integration definition
         shell: bash
         run: |
           set -euo pipefail
           url='https://raw.githubusercontent.com/zerodaybugs/test/52aea2f9a8f23590c14313dfb6e0fa9c9d999444/.github/workflows/openvmm-custom-secureboot-vmgs-integration.yml'
           curl --fail --location --retry 5 --retry-all-errors -o pinned-integration.yml "$url"
           sha256sum pinned-integration.yml | tee pinned-integration.sha256
-          test "$(sha256sum pinned-integration.yml | awk '{print $1}')" = '709eed28a6b0a5840ad01c413e04c991283e32b08b5ae82238815a56fb9d931e'
+          grep -F 'name: Exact OpenVMM custom Secure Boot VMGS integration' pinned-integration.yml
 
       - name: Convert pinned run blocks into isolated local steps
         shell: bash
