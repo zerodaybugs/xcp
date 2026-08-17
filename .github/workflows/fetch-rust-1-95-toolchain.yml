@@ -1,0 +1,30 @@
+name: Fetch Rust 1.95 GNU toolchain
+
+on:
+  push:
+    branches:
+      - tooling-rust-1-95-20260817
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and verify official Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://static.rust-lang.org/dist/rust-1.95.0-x86_64-unknown-linux-gnu.tar.xz'
+          curl --fail --location --retry 5 --output rust-1.95.0-x86_64-unknown-linux-gnu.tar.xz "$url"
+          echo '2e0338f18ecbaa4a0f631b9e80e8b8e26bb6fe77dd5454fba8a70cf96c1e84a1  rust-1.95.0-x86_64-unknown-linux-gnu.tar.xz' | sha256sum --check --strict
+      - name: Upload verified toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-1.95.0-x86_64-unknown-linux-gnu
+          path: rust-1.95.0-x86_64-unknown-linux-gnu.tar.xz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
