@@ -1,0 +1,117 @@
+name: Exact OpenVMM custom Secure Boot VMGS integration wrapper
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .github/workflows/openvmm-custom-secureboot-wrapper.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: '1'
+    steps:
+      - name: Install workflow parser
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --no-input pyyaml
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Fetch and pin owned integration definition
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://raw.githubusercontent.com/zerodaybugs/test/52aea2f9a8f23590c14313dfb6e0fa9c9d999444/.github/workflows/openvmm-custom-secureboot-vmgs-integration.yml'
+          curl --fail --location --retry 5 --retry-all-errors -o pinned-integration.yml "$url"
+          sha256sum pinned-integration.yml | tee pinned-integration.sha256
+          test "$(sha256sum pinned-integration.yml | awk '{print $1}')" = '709eed28a6b0a5840ad01c413e04c991283e32b08b5ae82238815a56fb9d931e'
+
+      - name: Convert pinned run blocks into isolated local steps
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import shlex
+          import yaml
+
+          doc = yaml.safe_load(Path('pinned-integration.yml').read_text(encoding='utf-8'))
+          steps = doc['jobs']['integration']['steps']
+          out = ['#!/usr/bin/env bash', 'set -e']
+          selected = 0
+          for step in steps:
+              run = step.get('run')
+              if not run:
+                  continue
+              shell = step.get('shell', 'bash')
+              if shell not in ('bash', None):
+                  raise SystemExit(f'unsupported inline shell: {shell}')
+              name = step.get('name', f'step-{selected + 1}')
+              out.extend([
+                  '',
+                  '(',
+                  '  cd "$GITHUB_WORKSPACE"',
+                  f'  echo {shlex.quote("===== " + name + " =====")}',
+              ])
+              out.extend('  ' + line for line in run.splitlines())
+              out.append(')')
+              selected += 1
+          if selected < 8:
+              raise SystemExit(f'unexpected run-block count: {selected}')
+          Path('execute-pinned-integration.sh').write_text('\n'.join(out) + '\n', encoding='utf-8')
+          print(f'run_blocks={selected}')
+          PY
+          chmod +x execute-pinned-integration.sh
+          sha256sum execute-pinned-integration.sh | tee execute-pinned-integration.sha256
+
+      - name: Execute exact integration
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          ./execute-pinned-integration.sh 2>&1 | tee wrapper-execution.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "return_code=$rc" | tee wrapper-execution-status.txt
+          exit "$rc"
+
+      - name: Upload auditable evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-openvmm-custom-secureboot-wrapper
+          path: |
+            pinned-integration.yml
+            pinned-integration.sha256
+            execute-pinned-integration.sh
+            execute-pinned-integration.sha256
+            wrapper-execution.log
+            wrapper-execution-status.txt
+            runner-baseline.txt
+            source-commit.txt
+            MSVM.fd.sha256
+            protoc-version.txt
+            restore-packages.log
+            secure-boot-cert-metadata.txt
+            secure-boot-cert-der.sha256
+            test-only-diff-stat.txt
+            nvram-export-test.log
+            custom-secure-boot-nvram.sha256
+            vmgstool-build.log
+            nvram-dump.txt
+            vmgs-headers.txt
+            custom-secure-boot.vmgs.sha256
+            custom-secure-boot-integration.log
+            custom-secure-boot-integration-status.txt
+          retention-days: 7
