@@ -1,0 +1,153 @@
+name: Windows VM firmware resource inventory
+
+on:
+  push:
+    branches:
+      - openhcl-lab-20260818
+    paths:
+      - .github/workflows/windows-vm-firmware-resource-inventory.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Install PE parser
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --no-input pefile
+
+      - name: Collect signed firmware resource metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @"
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import platform
+          import subprocess
+          import sys
+          from datetime import datetime, timezone
+
+          import pefile
+
+          roots = [pathlib.Path(os.environ['WINDIR']) / 'System32', pathlib.Path(os.environ['WINDIR']) / 'WinSxS']
+          names = {'vmfirmwarehcl.dll', 'vmfirmware.dll', 'vmfirmwareigvm.dll'}
+          candidates = []
+          for root in roots:
+              if not root.exists():
+                  continue
+              if root.name.lower() == 'system32':
+                  paths = list(root.glob('vmfirmware*.dll'))
+              else:
+                  paths = list(root.rglob('vmfirmware*.dll'))
+              for path in paths:
+                  if path.name.lower() in names or path.name.lower().startswith('vmfirmware'):
+                      candidates.append(path)
+
+          def ps_signature(path):
+              escaped = str(path).replace("'", "''")
+              cmd = [
+                  'powershell', '-NoProfile', '-NonInteractive', '-Command',
+                  "$s=Get-AuthenticodeSignature -LiteralPath '%s'; "
+                  "[pscustomobject]@{Status=[string]$s.Status;Signer=if($s.SignerCertificate){$s.SignerCertificate.Subject}else{$null};Thumbprint=if($s.SignerCertificate){$s.SignerCertificate.Thumbprint}else{$null};TimestampSigner=if($s.TimeStamperCertificate){$s.TimeStamperCertificate.Subject}else{$null}} | ConvertTo-Json -Compress" % escaped,
+              ]
+              try:
+                  return json.loads(subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL))
+              except Exception as exc:
+                  return {'error': type(exc).__name__}
+
+          def version_info(path):
+              escaped = str(path).replace("'", "''")
+              cmd = [
+                  'powershell', '-NoProfile', '-NonInteractive', '-Command',
+                  "$v=(Get-Item -LiteralPath '%s').VersionInfo; "
+                  "[pscustomobject]@{FileVersion=$v.FileVersion;ProductVersion=$v.ProductVersion;CompanyName=$v.CompanyName;OriginalFilename=$v.OriginalFilename} | ConvertTo-Json -Compress" % escaped,
+              ]
+              try:
+                  return json.loads(subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL))
+              except Exception as exc:
+                  return {'error': type(exc).__name__}
+
+          def resource_name(entry):
+              if entry.name is not None:
+                  return str(entry.name)
+              return str(entry.struct.Id)
+
+          records = []
+          for path in sorted(set(candidates), key=lambda p: str(p).lower()):
+              data = path.read_bytes()
+              rec = {
+                  'path_class': 'System32' if 'system32' in [x.lower() for x in path.parts] else 'WinSxS',
+                  'filename': path.name,
+                  'size': len(data),
+                  'sha256': hashlib.sha256(data).hexdigest(),
+                  'version': version_info(path),
+                  'authenticode': ps_signature(path),
+                  'resources': [],
+                  'pe_error': None,
+              }
+              try:
+                  pe = pefile.PE(data=data, fast_load=False)
+                  if hasattr(pe, 'DIRECTORY_ENTRY_RESOURCE'):
+                      for type_entry in pe.DIRECTORY_ENTRY_RESOURCE.entries:
+                          tname = resource_name(type_entry)
+                          for name_entry in type_entry.directory.entries:
+                              nname = resource_name(name_entry)
+                              for lang_entry in name_entry.directory.entries:
+                                  rva = lang_entry.data.struct.OffsetToData
+                                  size = lang_entry.data.struct.Size
+                                  blob = pe.get_memory_mapped_image()[rva:rva+size]
+                                  rec['resources'].append({
+                                      'type': tname,
+                                      'name': nname,
+                                      'lang': int(lang_entry.struct.Id),
+                                      'size': int(size),
+                                      'sha256': hashlib.sha256(blob).hexdigest(),
+                                      'igvm_magic_offsets': [i for i in range(0, max(0, len(blob)-3)) if blob[i:i+4] == b'IGVM'][:16],
+                                  })
+              except Exception as exc:
+                  rec['pe_error'] = f'{type(exc).__name__}: {exc}'
+              records.append(rec)
+
+          output = {
+              'schema': 'windows-vm-firmware-resource-inventory-v1',
+              'generated_utc': datetime.now(timezone.utc).isoformat(),
+              'runner_os': platform.platform(),
+              'python': sys.version,
+              'candidate_count': len(records),
+              'records': records,
+          }
+          pathlib.Path('firmware-resource-inventory.json').write_text(json.dumps(output, indent=2), encoding='utf-8')
+          pathlib.Path('firmware-resource-summary.txt').write_text(
+              '\n'.join([
+                  f"candidate_count={len(records)}",
+                  *[
+                      f"{r['path_class']} {r['filename']} sha256={r['sha256']} auth={r['authenticode'].get('Status')} resources={len(r['resources'])} vmfw={sum(1 for x in r['resources'] if x['type'].upper() == 'VMFW')} igvm={sum(len(x['igvm_magic_offsets']) for x in r['resources'])}"
+                      for r in records
+                  ],
+              ]) + '\n',
+              encoding='utf-8',
+          )
+          "@ | Set-Content -LiteralPath inventory.py -Encoding UTF8
+          python inventory.py
+          Get-Content firmware-resource-summary.txt
+
+      - name: Upload inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-vm-firmware-resource-inventory-${{ matrix.os }}
+          path: |
+            firmware-resource-inventory.json
+            firmware-resource-summary.txt
+          retention-days: 7
