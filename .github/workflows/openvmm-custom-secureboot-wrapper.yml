@@ -111,6 +111,40 @@ jobs:
           PY
           ''').strip('\n')
           script = script[:start] + robust_patch + script[end:]
+
+          test_marker = "cat >> vmm_tests/vmm_tests/tests/tests/multiarch/vmgs.rs <<'RS'"
+          if script.count(test_marker) != 1:
+              raise SystemExit(f'unexpected VMGS test marker count: {script.count(test_marker)}')
+          builder_patch = dedent(r'''
+          cat >> petri/src/vm/mod.rs <<'RS'
+
+          impl<T: PetriVmmBackend> PetriVmBuilder<T> {
+              /// Enable UEFI Secure Boot while preserving an already-populated
+              /// persistent NVRAM trust database supplied through VMGS.
+              pub fn with_secure_boot_enabled_without_template(mut self) -> Self {
+                  let config = self
+                      .config
+                      .firmware
+                      .uefi_config_mut()
+                      .expect("Secure boot is only supported for UEFI firmware.");
+                  config.secure_boot_enabled = true;
+                  config.secure_boot_template = None;
+                  self
+              }
+          }
+          RS
+
+          ''').strip('\n') + '\n\n'
+          script = script.replace(test_marker, builder_patch + test_marker, 1)
+          template_call = '.with_windows_secure_boot_template()'
+          if script.count(template_call) != 1:
+              raise SystemExit(f'unexpected Secure Boot template call count: {script.count(template_call)}')
+          script = script.replace(
+              template_call,
+              '.with_secure_boot_enabled_without_template()',
+              1,
+          )
+
           Path('execute-pinned-integration.sh').write_text(script, encoding='utf-8')
           print(f'run_blocks={selected}')
           PYGEN
