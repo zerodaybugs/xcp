@@ -145,6 +145,12 @@ jobs:
               1,
           )
 
+          old_filter = "--filter 'test(custom_secure_boot_vmgs_guest)'"
+          exact_filter = "--filter 'test(/^openvmm_openhcl_uefi_x64_guest_test_x64_custom_secure_boot_vmgs_guest$/)'"
+          if script.count(old_filter) != 1:
+              raise SystemExit(f'unexpected custom test filter count: {script.count(old_filter)}')
+          script = script.replace(old_filter, exact_filter, 1)
+
           Path('execute-pinned-integration.sh').write_text(script, encoding='utf-8')
           print(f'run_blocks={selected}')
           PYGEN
