@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
+          python - <<'PYGEN'
           from pathlib import Path
           import shlex
           from textwrap import dedent
@@ -113,7 +113,7 @@ jobs:
           script = script[:start] + robust_patch + script[end:]
           Path('execute-pinned-integration.sh').write_text(script, encoding='utf-8')
           print(f'run_blocks={selected}')
-          PY
+          PYGEN
           chmod +x execute-pinned-integration.sh
           bash -n execute-pinned-integration.sh
           sha256sum execute-pinned-integration.sh | tee execute-pinned-integration.sha256
