@@ -18,6 +18,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: '1'
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Install workflow parser
         shell: bash
