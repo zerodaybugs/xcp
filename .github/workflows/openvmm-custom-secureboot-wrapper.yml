@@ -45,6 +45,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import shlex
+          from textwrap import dedent
           import yaml
 
           doc = yaml.safe_load(Path('pinned-integration.yml').read_text(encoding='utf-8'))
@@ -59,8 +60,6 @@ jobs:
               if shell not in ('bash', None):
                   raise SystemExit(f'unsupported inline shell: {shell}')
               name = step.get('name', f'step-{selected + 1}')
-              # Keep the original run block at column zero. Heredoc terminators such
-              # as PY and RS are syntactically significant and must not be indented.
               out.extend([
                   '',
                   '(',
@@ -72,7 +71,47 @@ jobs:
               selected += 1
           if selected < 8:
               raise SystemExit(f'unexpected run-block count: {selected}')
-          Path('execute-pinned-integration.sh').write_text('\n'.join(out) + '\n', encoding='utf-8')
+
+          script = '\n'.join(out) + '\n'
+          patch_start = "python - <<'PY'\nfrom pathlib import Path\n\npath = Path('flowey/flowey_lib_hvlite/src/build_guest_test_uefi.rs')"
+          patch_end = "\nPY\n\ncat >> vm/devices/firmware/firmware_uefi/src/service/nvram/mod.rs <<'RS'"
+          start = script.index(patch_start)
+          end = script.index(patch_end, start) + len("\nPY")
+          robust_patch = dedent(r'''
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('flowey/flowey_lib_hvlite/src/build_guest_test_uefi.rs')
+          text = path.read_text(encoding='utf-8')
+          old_token = 'let (efi, pdb) = match rt.read(output) {'
+          new_token = 'let (mut efi, pdb) = match rt.read(output) {'
+          if text.count(old_token) != 1:
+              raise SystemExit(f'unexpected signing source anchor count: {text.count(old_token)}')
+          text = text.replace(old_token, new_token, 1)
+          marker = '                    // package it up into an img using the xtask'
+          if text.count(marker) != 1:
+              raise SystemExit(f'unexpected packaging marker count: {text.count(marker)}')
+          block = '\n'.join([
+              '                    if let (Some(key), Some(cert)) = (',
+              '                        std::env::var_os("CUSTOM_SB_KEY"),',
+              '                        std::env::var_os("CUSTOM_SB_CERT"),',
+              '                    ) {',
+              '                        let key = PathBuf::from(key);',
+              '                        let cert = PathBuf::from(cert);',
+              '                        let signed_efi = rt.sh.current_dir().join("guest_test_uefi.signed.efi");',
+              '                        flowey::shell_cmd!(',
+              '                            rt,',
+              '                            "sbsign --key {key} --cert {cert} --output {signed_efi} {efi}"',
+              '                        )',
+              '                        .run()?;',
+              '                        efi = signed_efi;',
+              '                    }',
+          ])
+          path.write_text(text.replace(marker, block + '\n\n' + marker, 1), encoding='utf-8')
+          PY
+          ''').strip('\n')
+          script = script[:start] + robust_patch + script[end:]
+          Path('execute-pinned-integration.sh').write_text(script, encoding='utf-8')
           print(f'run_blocks={selected}')
           PY
           chmod +x execute-pinned-integration.sh
