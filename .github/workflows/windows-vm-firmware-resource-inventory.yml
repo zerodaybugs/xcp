@@ -6,6 +6,11 @@ on:
       - openhcl-lab-20260818
     paths:
       - .github/workflows/windows-vm-firmware-resource-inventory.yml
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .github/workflows/windows-vm-firmware-resource-inventory.yml
   workflow_dispatch:
 
 permissions:
