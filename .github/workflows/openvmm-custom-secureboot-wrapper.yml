@@ -59,13 +59,15 @@ jobs:
               if shell not in ('bash', None):
                   raise SystemExit(f'unsupported inline shell: {shell}')
               name = step.get('name', f'step-{selected + 1}')
+              # Keep the original run block at column zero. Heredoc terminators such
+              # as PY and RS are syntactically significant and must not be indented.
               out.extend([
                   '',
                   '(',
-                  '  cd "$GITHUB_WORKSPACE"',
-                  f'  echo {shlex.quote("===== " + name + " =====")}',
+                  'cd "$GITHUB_WORKSPACE"',
+                  f'echo {shlex.quote("===== " + name + " =====")}',
               ])
-              out.extend('  ' + line for line in run.splitlines())
+              out.extend(run.splitlines())
               out.append(')')
               selected += 1
           if selected < 8:
@@ -74,6 +76,7 @@ jobs:
           print(f'run_blocks={selected}')
           PY
           chmod +x execute-pinned-integration.sh
+          bash -n execute-pinned-integration.sh
           sha256sum execute-pinned-integration.sh | tee execute-pinned-integration.sha256
 
       - name: Execute exact integration
