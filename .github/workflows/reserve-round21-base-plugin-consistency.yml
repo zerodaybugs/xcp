@@ -1,0 +1,128 @@
+name: reserve-round21-base-plugin-consistency-read-only
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .github/workflows/reserve-round21-base-plugin-consistency.yml
+
+permissions:
+  contents: read
+
+jobs:
+  base-plugin-consistency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      FOUNDRY_VERSION: v1.7.1
+      FOUNDRY_SHA256: cf7e688ed0c4c48adffca788b496076e31060b67ac5afe1e43dbb5499c20c88b
+      RPC_URL: https://base-rpc.publicnode.com
+      AERO: 0x940181a94A35A4569E4529A3CDfB74e38FD98631
+    steps:
+      - name: Checkout workflow
+        uses: actions/checkout@v4
+
+      - name: Install verified Foundry
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p foundry-bin evidence
+          url="https://github.com/foundry-rs/foundry/releases/download/${FOUNDRY_VERSION}/foundry_${FOUNDRY_VERSION}_linux_amd64.tar.gz"
+          curl --fail --location --retry 5 --retry-all-errors "$url" -o foundry.tar.gz
+          echo "${FOUNDRY_SHA256}  foundry.tar.gz" | sha256sum -c -
+          tar -xzf foundry.tar.gz -C foundry-bin
+          foundry-bin/cast --version | tee evidence/cast-version.txt
+
+      - name: Probe deployed collateral-wrapper-gauge-pool graph at one pinned block
+        shell: bash
+        run: |
+          set -euo pipefail
+          BLOCK=$(foundry-bin/cast block-number --rpc-url "$RPC_URL")
+          {
+            echo "chain_id=$(foundry-bin/cast chain-id --rpc-url "$RPC_URL")"
+            echo "block=$BLOCK"
+          } | tee evidence/environment.txt
+          foundry-bin/cast block "$BLOCK" --rpc-url "$RPC_URL" --json > evidence/block.json
+
+          cat > evidence/targets.tsv <<'EOF'
+          aeroUSDCeUSD	0x97F9d5ed17A0C99B279887caD5254d15fb1B619B	0xDB5b8cead52f77De0f6B5255f73F348AAf2CBb8D	0x7A034374C89C463DD65D8C9BCfe63BcBCED41f4F	0x793F22aB88dC91793E5Ce6ADbd7E733B0BD4733e	true
+          aeroWETHAERO	0xee587c5C262824b9423e73303dFf270EcE5074c9	0x65f2c1b253a3E45670aDD259C9688Edf1A3b814d	0x7f670f78B17dEC44d5Ef68a48740b6f8849cc2e6	0x96a24aB830D4ec8b1F6f04Ceac104F1A3b211a01	false
+          aeroMOGWETH	0x719fbae9e2Dcd525bCf060a8D5DBC6C9fE104A50	0xfaAC26b279338dF8cF56B11A572617f674A2F69C	0x4a311ac4563abc30e71d0631c88a6232c1309ac5	0x8FCc385d8d7f3A2e087853a79531630Bf96575e8	false
+          aeroWETHcbBTC	0x171034eFCA7349E4D1944d179ccf52277D1CA6c9	0x4BD08a771CdAbA5333CAc6F20322eD7d72b6cBfA	0x2578365B3dfA7FfE60108e181EFb79FeDdec2319	0xAFdEBa12B6a870d6639d043030b4b49F9C7c62BB	false
+          aeroWETHWELL	0x5Cb6656970B21d51c0885C3831A14010d3fBF5Ed	0x1F599F8657CAA38Ee825e4E2d64F695749E2a161	0x89D0F320ac73dd7d9513FFC5bc58D1161452a657	0x7b6964440b615aC1d31bc95681B133E112fB2684	false
+          aeroWETHDEGEN	0xb56aa995Ab51f32885C72aA825BEa7559c06a72f	0xA762F790a31654D9AeF7DE550A473A0F5621E4F1	0x2C4909355b0C036840819484c3A882A95659aBf3	0x86A1260AB9f758026Ce1a5830BdfF66DBcF736d5	false
+          EOF
+          sed -i 's/^          //' evidence/targets.tsv
+
+          call() {
+            local address="$1" sig="$2"; shift 2
+            foundry-bin/cast call --rpc-url "$RPC_URL" --block "$BLOCK" "$address" "$sig" "$@"
+          }
+          lower() { tr '[:upper:]' '[:lower:]'; }
+          as_addr() { sed -nE 's/.*(0x[0-9a-fA-F]{40}).*/\1/p' | head -1 | lower; }
+          as_uint() { sed -nE 's/^([0-9]+).*/\1/p' | head -1; }
+
+          printf 'name\tcollateral\twrapper\tpool\tgauge\tstable\ttoken0\ttoken1\twrapper_supply\tgauge_stake\twrapper_lp_idle\taero_balance\tearned\tstatus\tref_per_tok\tprice\n' > evidence/results.tsv
+          while IFS=$'\t' read -r name collateral wrapper expected_pool expected_gauge expected_stable; do
+            test -n "$name"
+            test "$(foundry-bin/cast code --rpc-url "$RPC_URL" --block "$BLOCK" "$collateral")" != '0x'
+            test "$(foundry-bin/cast code --rpc-url "$RPC_URL" --block "$BLOCK" "$wrapper")" != '0x'
+
+            actual_wrapper=$(call "$collateral" 'erc20()(address)' | as_addr)
+            actual_pool_from_coll=$(call "$collateral" 'pool()(address)' | as_addr)
+            actual_pool=$(call "$wrapper" 'underlying()(address)' | as_addr)
+            actual_gauge=$(call "$wrapper" 'gauge()(address)' | as_addr)
+            wrapper_reward=$(call "$wrapper" 'rewardToken()(address)' | as_addr)
+            gauge_staking=$(call "$actual_gauge" 'stakingToken()(address)' | as_addr)
+            gauge_reward=$(call "$actual_gauge" 'rewardToken()(address)' | as_addr)
+            stable=$(call "$actual_pool" 'stable()(bool)' | tr -d '[:space:]')
+            token0=$(call "$actual_pool" 'token0()(address)' | as_addr)
+            token1=$(call "$actual_pool" 'token1()(address)' | as_addr)
+            wrapper_supply=$(call "$wrapper" 'totalSupply()(uint256)' | as_uint)
+            gauge_stake=$(call "$actual_gauge" 'balanceOf(address)(uint256)' "$wrapper" | as_uint)
+            wrapper_lp_idle=$(call "$actual_pool" 'balanceOf(address)(uint256)' "$wrapper" | as_uint)
+            aero_balance=$(call "$AERO" 'balanceOf(address)(uint256)' "$wrapper" | as_uint)
+            earned=$(call "$actual_gauge" 'earned(address)(uint256)' "$wrapper" | as_uint)
+            status=$(call "$collateral" 'status()(uint8)' | as_uint)
+            ref_per_tok=$(call "$collateral" 'refPerTok()(uint192)' | as_uint)
+            price=$(call "$collateral" 'price()(uint192,uint192)' | tr '\n' ',' | sed 's/,$//')
+
+            test "$actual_wrapper" = "$(echo "$wrapper" | lower)"
+            test "$actual_pool_from_coll" = "$(echo "$expected_pool" | lower)"
+            test "$actual_pool" = "$(echo "$expected_pool" | lower)"
+            test "$actual_gauge" = "$(echo "$expected_gauge" | lower)"
+            test "$wrapper_reward" = "$(echo "$AERO" | lower)"
+            test "$gauge_staking" = "$(echo "$expected_pool" | lower)"
+            test "$gauge_reward" = "$(echo "$AERO" | lower)"
+            test "$stable" = "$expected_stable"
+            test $((gauge_stake + wrapper_lp_idle)) -eq "$wrapper_supply"
+
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$name" "$collateral" "$wrapper" "$actual_pool" "$actual_gauge" "$stable" \
+              "$token0" "$token1" "$wrapper_supply" "$gauge_stake" "$wrapper_lp_idle" \
+              "$aero_balance" "$earned" "$status" "$ref_per_tok" "$price" >> evidence/results.tsv
+          done < evidence/targets.tsv
+
+          echo 'RESERVE_BASE_AERODROME_WIRING_PASS' | tee evidence/verdict.txt
+          cat evidence/results.tsv
+
+      - name: Seal and triple-check evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          find evidence -type f -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS.txt
+          tar -czf reserve-round21-base-plugin-consistency.tar.gz evidence
+          sha256sum reserve-round21-base-plugin-consistency.tar.gz > reserve-round21-base-plugin-consistency.tar.gz.sha256
+          for run in 1 2 3; do tar -tzf reserve-round21-base-plugin-consistency.tar.gz >/dev/null; done
+
+      - name: Upload read-only evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: reserve-round21-base-plugin-consistency
+          path: |
+            reserve-round21-base-plugin-consistency.tar.gz
+            reserve-round21-base-plugin-consistency.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
