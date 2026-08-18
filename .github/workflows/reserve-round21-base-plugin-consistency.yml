@@ -1,3 +1,4 @@
+# Temporary read-only research workflow. Do not merge.
 name: reserve-round21-base-plugin-consistency-read-only
 
 on:
