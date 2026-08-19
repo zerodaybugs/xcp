@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - '.github/workflows/ephemeral-private-windows-validation.yml'
+      - '.github/scripts/ephemeral-private-windows-validation.sh'
   workflow_dispatch:
 
 permissions:
@@ -34,11 +35,14 @@ jobs:
           path: |
             private_validation_public_metadata/input_certificate.pem
             private_validation_public_metadata/INPUT_CERTIFICATE_METADATA.txt
+            private_validation_public_metadata/PATH_DIAGNOSTICS.txt
             private_validation_public_metadata/UNAME.txt
             private_validation_public_metadata/OPENSSL_VERSION.txt
             private_validation_public_metadata/PYTHON_VERSION.txt
             private_validation_public_metadata/RUST_VERSION.txt
             private_validation_public_metadata/CMAKE_VERSION.txt
+            private_validation_public_metadata/OPENSSL_REQ.stdout.txt
+            private_validation_public_metadata/OPENSSL_REQ.stderr.txt
           if-no-files-found: error
           retention-days: 1
 
