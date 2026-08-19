@@ -1,0 +1,73 @@
+name: Ephemeral encrypted Windows validation
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/ephemeral-private-windows-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  private-windows-validation:
+    runs-on: windows-2025
+    timeout-minutes: 210
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out temporary validation branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Generate one-time input certificate
+        run: bash .github/scripts/ephemeral-private-windows-validation.sh prepare
+
+      - name: Publish one-time input certificate
+        uses: actions/upload-artifact@v4
+        with:
+          name: ephemeral-windows-input-certificate-${{ github.run_id }}
+          path: |
+            private_validation_public_metadata/input_certificate.pem
+            private_validation_public_metadata/INPUT_CERTIFICATE_METADATA.txt
+            private_validation_public_metadata/UNAME.txt
+            private_validation_public_metadata/OPENSSL_VERSION.txt
+            private_validation_public_metadata/PYTHON_VERSION.txt
+            private_validation_public_metadata/RUST_VERSION.txt
+            private_validation_public_metadata/CMAKE_VERSION.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Receive, execute, and encrypt private payload
+        id: private_run
+        continue-on-error: true
+        run: |
+          set +e
+          bash .github/scripts/ephemeral-private-windows-validation.sh run
+          status=$?
+          printf 'status=%s\n' "$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Upload encrypted private result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-private-windows-result-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/private-validation-result/encrypted-result.cms
+            ${{ runner.temp }}/private-validation-result/ENCRYPTED_RESULT_SHA256.txt
+            ${{ runner.temp }}/private-validation-result/RESULT_STATUS.txt
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Enforce private result after encrypted upload
+        if: always()
+        env:
+          PRIVATE_STATUS: ${{ steps.private_run.outputs.status }}
+        run: |
+          set -euo pipefail
+          test "$PRIVATE_STATUS" = '0'
