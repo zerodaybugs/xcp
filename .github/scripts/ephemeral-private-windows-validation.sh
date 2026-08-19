@@ -3,10 +3,22 @@ set -Eeuo pipefail
 umask 077
 
 mode="${1:-}"
-key_dir="${RUNNER_TEMP:-/tmp}/private-validation-key"
-payload_dir="${RUNNER_TEMP:-/tmp}/private-validation-payload"
-result_dir="${RUNNER_TEMP:-/tmp}/private-validation-result"
-public_dir="$GITHUB_WORKSPACE/private_validation_public_metadata"
+
+to_posix_path() {
+  local value="$1"
+  if command -v cygpath >/dev/null 2>&1 && [[ "$value" =~ ^[A-Za-z]:[\\/] ]]; then
+    cygpath -u "$value"
+  else
+    printf '%s\n' "$value"
+  fi
+}
+
+runner_temp="$(to_posix_path "${RUNNER_TEMP:-/tmp}")"
+workspace="$(to_posix_path "${GITHUB_WORKSPACE:-$PWD}")"
+key_dir="$runner_temp/private-validation-key"
+payload_dir="$runner_temp/private-validation-payload"
+result_dir="$runner_temp/private-validation-result"
+public_dir="$workspace/private_validation_public_metadata"
 
 find_openssl() {
   if command -v openssl >/dev/null 2>&1; then
@@ -30,13 +42,20 @@ OPENSSL_BIN="$(find_openssl)"
 prepare() {
   rm -rf "$key_dir" "$public_dir"
   mkdir -p "$key_dir" "$public_dir"
-  uname -a > "$public_dir/UNAME.txt"
-  "$OPENSSL_BIN" version -a > "$public_dir/OPENSSL_VERSION.txt"
-  python --version > "$public_dir/PYTHON_VERSION.txt" 2>&1 || python3 --version > "$public_dir/PYTHON_VERSION.txt" 2>&1
+
+  {
+    printf 'runner_temp=%s\n' "$runner_temp"
+    printf 'workspace=%s\n' "$workspace"
+    printf 'openssl=%s\n' "$OPENSSL_BIN"
+  } > "$public_dir/PATH_DIAGNOSTICS.txt"
+
+  uname -a > "$public_dir/UNAME.txt" 2>&1 || true
+  "$OPENSSL_BIN" version -a > "$public_dir/OPENSSL_VERSION.txt" 2>&1 || true
+  (python --version || python3 --version || py -3 --version) > "$public_dir/PYTHON_VERSION.txt" 2>&1 || true
   rustc --version > "$public_dir/RUST_VERSION.txt" 2>&1 || true
   cmake --version > "$public_dir/CMAKE_VERSION.txt" 2>&1 || true
 
-  "$OPENSSL_BIN" req \
+  if ! MSYS2_ARG_CONV_EXCL='/CN=' "$OPENSSL_BIN" req \
     -x509 \
     -newkey rsa:4096 \
     -nodes \
@@ -45,7 +64,14 @@ prepare() {
     -subj "/CN=ephemeral-windows-input-${GITHUB_RUN_ID}" \
     -keyout "$key_dir/private.pem" \
     -out "$key_dir/certificate.pem" \
-    >/dev/null 2>&1
+    > "$public_dir/OPENSSL_REQ.stdout.txt" \
+    2> "$public_dir/OPENSSL_REQ.stderr.txt"; then
+      cat "$public_dir/OPENSSL_REQ.stderr.txt" >&2 || true
+      exit 1
+  fi
+
+  test -s "$key_dir/private.pem"
+  test -s "$key_dir/certificate.pem"
   chmod 600 "$key_dir/private.pem"
   "$OPENSSL_BIN" x509 \
     -in "$key_dir/certificate.pem" \
@@ -74,7 +100,10 @@ with tarfile.open(archive, 'r:*') as tf:
             raise SystemExit(f'unsafe payload path: {member.name!r}')
         if member.issym() or member.islnk() or member.isdev():
             raise SystemExit(f'unsupported payload member: {member.name!r}')
-    tf.extractall(target, members=members, filter='data')
+    try:
+        tf.extractall(target, members=members, filter='data')
+    except TypeError:
+        tf.extractall(target, members=members)
 PY
 }
 
