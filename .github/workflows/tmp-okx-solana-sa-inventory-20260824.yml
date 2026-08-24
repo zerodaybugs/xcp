@@ -1,0 +1,154 @@
+name: Temporary OKX Solana SA read-only inventory 2026-08-24
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-solana-sa-inventory-trigger-20260824.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Query shared authority through public Solana RPC
+        shell: bash
+        env:
+          RPC_URL: https://api.mainnet-beta.solana.com
+          AUTHORITY: HV1KXxWFaSeriyFvXyx48FqG9BoFbfinB8njCJonqP7K
+          ROUTER_PROGRAM: 6m2CDdhRgxpH4WjvdzxAYbGxwdGUz5MziiL5jek2kBma
+        run: |
+          set -euo pipefail
+          mkdir -p artifact/raw artifact/mints
+
+          rpc() {
+            local method="$1"
+            local params="$2"
+            curl --fail --silent --show-error --retry 4 \
+              -H 'content-type: application/json' \
+              --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"${method}\",\"params\":${params}}" \
+              "$RPC_URL"
+          }
+
+          rpc getSlot '[{"commitment":"finalized"}]' > artifact/raw/slot.json
+          rpc getBalance "[\"${AUTHORITY}\",{\"commitment\":\"finalized\"}]" > artifact/raw/authority-balance.json
+          rpc getAccountInfo "[\"${AUTHORITY}\",{\"encoding\":\"jsonParsed\",\"commitment\":\"finalized\"}]" > artifact/raw/authority-account.json
+          rpc getAccountInfo "[\"${ROUTER_PROGRAM}\",{\"encoding\":\"base64\",\"commitment\":\"finalized\"}]" > artifact/raw/router-program-account.json
+
+          rpc getTokenAccountsByOwner \
+            "[\"${AUTHORITY}\",{\"programId\":\"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA\"},{\"encoding\":\"jsonParsed\",\"commitment\":\"finalized\"}]" \
+            > artifact/raw/token-v1-accounts.json
+
+          rpc getTokenAccountsByOwner \
+            "[\"${AUTHORITY}\",{\"programId\":\"TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb\"},{\"encoding\":\"jsonParsed\",\"commitment\":\"finalized\"}]" \
+            > artifact/raw/token-2022-accounts.json
+
+          python3 - <<'PY'
+          import json, pathlib, subprocess, time
+          root = pathlib.Path('artifact')
+          authority = 'HV1KXxWFaSeriyFvXyx48FqG9BoFbfinB8njCJonqP7K'
+          rpc_url = 'https://api.mainnet-beta.solana.com'
+          rows = []
+          for program, filename in [
+              ('spl-token', 'token-v1-accounts.json'),
+              ('token-2022', 'token-2022-accounts.json'),
+          ]:
+              data = json.loads((root / 'raw' / filename).read_text())
+              if 'error' in data:
+                  raise SystemExit(f'{filename}: {data["error"]}')
+              for item in data.get('result', {}).get('value', []):
+                  parsed = item['account']['data']['parsed']['info']
+                  amount = parsed['tokenAmount']
+                  rows.append({
+                      'program': program,
+                      'token_account': item['pubkey'],
+                      'mint': parsed['mint'],
+                      'owner': parsed['owner'],
+                      'raw_amount': amount['amount'],
+                      'decimals': amount['decimals'],
+                      'ui_amount_string': amount.get('uiAmountString'),
+                      'account_lamports': item['account']['lamports'],
+                      'account_space': item['account'].get('space'),
+                      'account_extensions': parsed.get('extensions', []),
+                  })
+          rows.sort(key=lambda x: (x['program'], x['mint'], x['token_account']))
+          (root / 'token-accounts.json').write_text(json.dumps(rows, indent=2) + '\n')
+
+          with (root / 'token-accounts.tsv').open('w') as f:
+              f.write('program\ttoken_account\tmint\traw_amount\tdecimals\tui_amount_string\taccount_lamports\taccount_space\n')
+              for r in rows:
+                  f.write('\t'.join(str(r[k]) for k in [
+                      'program','token_account','mint','raw_amount','decimals','ui_amount_string','account_lamports','account_space'
+                  ]) + '\n')
+
+          mints = sorted({r['mint'] for r in rows})
+          for index, mint in enumerate(mints):
+              payload = json.dumps({
+                  'jsonrpc':'2.0','id':1,'method':'getAccountInfo',
+                  'params':[mint,{'encoding':'jsonParsed','commitment':'finalized'}],
+              })
+              result = subprocess.run(
+                  ['curl','--fail','--silent','--show-error','--retry','4',
+                   '-H','content-type: application/json','--data',payload,rpc_url],
+                  check=True, capture_output=True, text=True,
+              )
+              (root / 'mints' / f'{mint}.json').write_text(result.stdout)
+              if index + 1 < len(mints):
+                  time.sleep(0.15)
+
+          mint_summaries = []
+          for mint in mints:
+              data = json.loads((root / 'mints' / f'{mint}.json').read_text())
+              value = data.get('result', {}).get('value')
+              summary = {'mint': mint, 'rpc_error': data.get('error'), 'exists': value is not None}
+              if value is not None:
+                  summary.update({
+                      'owner_program': value.get('owner'),
+                      'lamports': value.get('lamports'),
+                      'space': value.get('space'),
+                  })
+                  parsed = value.get('data', {}).get('parsed', {})
+                  info = parsed.get('info', {}) if isinstance(parsed, dict) else {}
+                  summary.update({
+                      'decimals': info.get('decimals'),
+                      'supply': info.get('supply'),
+                      'mint_authority': info.get('mintAuthority'),
+                      'freeze_authority': info.get('freezeAuthority'),
+                      'extensions': info.get('extensions', []),
+                  })
+              mint_summaries.append(summary)
+          (root / 'mint-summaries.json').write_text(json.dumps(mint_summaries, indent=2) + '\n')
+
+          nonzero = [r for r in rows if int(r['raw_amount']) > 0]
+          token2022_nonzero = [r for r in nonzero if r['program'] == 'token-2022']
+          transfer_fee_mints = []
+          for m in mint_summaries:
+              text = json.dumps(m.get('extensions', []), sort_keys=True).lower()
+              if 'transferfee' in text or 'transfer_fee' in text:
+                  transfer_fee_mints.append(m['mint'])
+          status = {
+              'authority': authority,
+              'token_account_count': len(rows),
+              'nonzero_token_account_count': len(nonzero),
+              'token_2022_account_count': sum(r['program'] == 'token-2022' for r in rows),
+              'nonzero_token_2022_account_count': len(token2022_nonzero),
+              'transfer_fee_mints': transfer_fee_mints,
+              'nonzero_accounts': nonzero,
+          }
+          (root / 'inventory-status.json').write_text(json.dumps(status, indent=2) + '\n')
+          PY
+
+          sha256sum artifact/raw/* artifact/mints/* artifact/*.json artifact/*.tsv > artifact/SHA256SUMS.txt
+
+      - name: Upload read-only inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: okx-solana-sa-readonly-inventory
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
