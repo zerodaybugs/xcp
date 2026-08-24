@@ -1,0 +1,76 @@
+name: Temporary OKX Solana Token-2022 release gate 2026-08-24
+
+on:
+  pull_request_target:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-solana-token2022-release-trigger-20260824.txt
+
+permissions:
+  contents: write
+
+jobs:
+  public-state-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+      - name: Query public state and build compact gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/okx-tf-release
+          rpc='https://api.mainnet-beta.solana.com'
+          owner='HV1KXxWFaSeriyFvXyx48FqG9BoFbfinB8njCJonqP7K'
+          curl --fail --silent --show-error --retry 5 -H 'content-type: application/json' \
+            --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getTokenAccountsByOwner\",\"params\":[\"${owner}\",{\"programId\":\"TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb\"},{\"encoding\":\"jsonParsed\",\"commitment\":\"confirmed\"}]}" \
+            "$rpc" > /tmp/okx-tf-release/accounts-rpc.json
+          curl --fail --silent --show-error --retry 5 -H 'content-type: application/json' \
+            --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBalance\",\"params\":[\"${owner}\",{\"commitment\":\"confirmed\"}]}" \
+            "$rpc" > /tmp/okx-tf-release/balance-rpc.json
+          python3 - <<'PY'
+          import json,pathlib,time,urllib.request,urllib.parse
+          root=pathlib.Path('/tmp/okx-tf-release')
+          obj=json.loads((root/'accounts-rpc.json').read_text()); rows=[]
+          for r in obj.get('result',{}).get('value',[]):
+              info=r['account']['data']['parsed']['info']; t=info['tokenAmount']; raw=int(t['amount'])
+              if raw>0: rows.append({'token_account':r['pubkey'],'mint':info['mint'],'raw_amount':raw,'decimals':int(t['decimals']),'ui_amount':float(t['uiAmountString'])})
+          for row in rows:
+              mint=row['mint']; exts=[]; has_tf=False; price=None; liq=None; dex=None; pair=None
+              try:
+                  payload=json.dumps({'jsonrpc':'2.0','id':1,'method':'getAccountInfo','params':[mint,{'encoding':'jsonParsed','commitment':'confirmed'}]}).encode()
+                  req=urllib.request.Request('https://api.mainnet-beta.solana.com',data=payload,headers={'content-type':'application/json','user-agent':'Mozilla/5.0'})
+                  with urllib.request.urlopen(req,timeout=20) as rr: data=json.load(rr)
+                  info=((((data.get('result') or {}).get('value') or {}).get('data') or {}).get('parsed') or {}).get('info') or {}
+                  exts=[str(e.get('extension','')) for e in (info.get('extensions') or []) if isinstance(e,dict)]
+                  has_tf=any(x.lower()=='transferfeeconfig' for x in exts)
+              except Exception as e: exts=['ERROR:'+repr(e)]
+              try:
+                  req=urllib.request.Request('https://api.dexscreener.com/latest/dex/tokens/'+urllib.parse.quote(mint),headers={'user-agent':'Mozilla/5.0'})
+                  with urllib.request.urlopen(req,timeout=20) as rr: pd=json.load(rr)
+                  vals=[]
+                  for p in pd.get('pairs') or []:
+                      try:
+                          pr=float(p.get('priceUsd') or 0); l=float((p.get('liquidity') or {}).get('usd') or 0)
+                          if pr>0: vals.append((l,pr,p.get('dexId'),p.get('pairAddress')))
+                      except Exception: pass
+                  if vals: vals.sort(reverse=True); liq,price,dex,pair=vals[0]
+              except Exception: pass
+              row.update({'extensions':exts,'has_transfer_fee_config':has_tf,'price_usd':price,'liquidity_usd':liq,'dex':dex,'pair':pair,'value_usd':row['ui_amount']*price if price is not None else None})
+              time.sleep(.25)
+          tf=[r for r in rows if r['has_transfer_fee_config']]; tfp=[r for r in tf if r['value_usd'] is not None]
+          summary={'owner': 'HV1KXxWFaSeriyFvXyx48FqG9BoFbfinB8njCJonqP7K','owner_lamports':json.loads((root/'balance-rpc.json').read_text()).get('result',{}).get('value'),'token2022_nonzero_count':len(rows),'transfer_fee_nonzero_count':len(tf),'transfer_fee_priced_count':len(tfp),'transfer_fee_total_usd':sum(r['value_usd'] for r in tfp),'transfer_fee_max_usd':max([r['value_usd'] for r in tfp] or [0]),'transfer_fee_max_liquidity_usd':max([r.get('liquidity_usd') or 0 for r in tf] or [0]),'decision':'ADVANCE_POC' if tfp and max(r['value_usd'] for r in tfp)>=100 and max(r.get('liquidity_usd') or 0 for r in tf)>=10000 else 'KILL_NO_MATERIAL_LIVE_SINK'}
+          (root/'summary.json').write_text(json.dumps(summary,indent=2)+'\n'); (root/'accounts.json').write_text(json.dumps(rows,indent=2)+'\n')
+          PY
+      - name: Publish temporary public-state release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='okx-solana-token2022-state-20260824'
+          gh release delete "$tag" --cleanup-tag --yes >/dev/null 2>&1 || true
+          gh release create "$tag" --title 'Temporary OKX Solana Token-2022 public-state gate' --notes 'Public read-only state only. No vulnerability details or production interaction.' /tmp/okx-tf-release/summary.json /tmp/okx-tf-release/accounts.json
