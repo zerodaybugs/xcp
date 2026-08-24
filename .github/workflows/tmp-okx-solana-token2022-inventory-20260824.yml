@@ -1,0 +1,156 @@
+name: Temporary OKX Solana Token-2022 read-only inventory 2026-08-24
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-solana-token2022-inventory-trigger-20260824.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Query public Solana state and public price metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          rpc='https://api.mainnet-beta.solana.com'
+          owner='HV1KXxWFaSeriyFvXyx48FqG9BoFbfinB8njCJonqP7K'
+
+          curl --fail --silent --show-error --retry 4 \
+            -H 'content-type: application/json' \
+            --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBalance\",\"params\":[\"${owner}\",{\"commitment\":\"confirmed\"}]}" \
+            "$rpc" > artifact/owner-balance.json
+
+          curl --fail --silent --show-error --retry 4 \
+            -H 'content-type: application/json' \
+            --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getTokenAccountsByOwner\",\"params\":[\"${owner}\",{\"programId\":\"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA\"},{\"encoding\":\"jsonParsed\",\"commitment\":\"confirmed\"}]}" \
+            "$rpc" > artifact/spl-token-accounts.json
+
+          curl --fail --silent --show-error --retry 4 \
+            -H 'content-type: application/json' \
+            --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getTokenAccountsByOwner\",\"params\":[\"${owner}\",{\"programId\":\"TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb\"},{\"encoding\":\"jsonParsed\",\"commitment\":\"confirmed\"}]}" \
+            "$rpc" > artifact/token2022-accounts.json
+
+          python3 - <<'PY'
+          import json, pathlib, time, urllib.request, urllib.parse
+          root = pathlib.Path('artifact')
+          accounts = []
+          for kind, name in [('spl', 'spl-token-accounts.json'), ('token2022', 'token2022-accounts.json')]:
+              obj = json.loads((root / name).read_text())
+              for row in obj.get('result', {}).get('value', []):
+                  info = row['account']['data']['parsed']['info']
+                  ta = info['tokenAmount']
+                  accounts.append({
+                      'kind': kind,
+                      'token_account': row['pubkey'],
+                      'mint': info['mint'],
+                      'owner': info['owner'],
+                      'raw_amount': int(ta['amount']),
+                      'decimals': int(ta['decimals']),
+                      'ui_amount': float(ta['uiAmountString']),
+                  })
+
+          nonzero = [x for x in accounts if x['raw_amount'] > 0]
+          mints = sorted({x['mint'] for x in nonzero})
+
+          # Read each mint through jsonParsed so Token-2022 extension data is preserved.
+          for mint in mints:
+              payload = json.dumps({
+                  'jsonrpc':'2.0','id':1,'method':'getAccountInfo',
+                  'params':[mint, {'encoding':'jsonParsed','commitment':'confirmed'}]
+              }).encode()
+              req = urllib.request.Request(
+                  'https://api.mainnet-beta.solana.com', data=payload,
+                  headers={'content-type':'application/json','user-agent':'Mozilla/5.0'}
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      data = json.load(r)
+                  (root / f'mint-{mint}.json').write_text(json.dumps(data, indent=2) + '\n')
+                  parsed = data.get('result',{}).get('value',{}).get('data',{}).get('parsed',{})
+                  info = parsed.get('info',{}) if isinstance(parsed,dict) else {}
+                  ext = info.get('extensions',[]) if isinstance(info,dict) else []
+                  has_tf = any(
+                      isinstance(e,dict) and str(e.get('extension','')).lower() == 'transferfeeconfig'
+                      for e in ext
+                  )
+              except Exception as e:
+                  has_tf = False
+                  (root / f'mint-{mint}.error.txt').write_text(repr(e) + '\n')
+              for a in accounts:
+                  if a['mint'] == mint:
+                      a['has_transfer_fee_config'] = has_tf
+              time.sleep(0.15)
+
+          # Public DEX Screener price/liquidity metadata; failures remain explicit.
+          prices = {}
+          for mint in mints:
+              url = 'https://api.dexscreener.com/latest/dex/tokens/' + urllib.parse.quote(mint)
+              try:
+                  req = urllib.request.Request(url, headers={'user-agent':'Mozilla/5.0'})
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      data = json.load(r)
+                  pairs = data.get('pairs') or []
+                  viable = []
+                  for p in pairs:
+                      try:
+                          price = float(p.get('priceUsd') or 0)
+                          liq = float((p.get('liquidity') or {}).get('usd') or 0)
+                          if price > 0:
+                              viable.append((liq, price, p.get('pairAddress'), p.get('dexId')))
+                      except Exception:
+                          pass
+                  if viable:
+                      viable.sort(reverse=True)
+                      liq, price, pair, dex = viable[0]
+                      prices[mint] = {'price_usd':price,'liquidity_usd':liq,'pair':pair,'dex':dex}
+                  (root / f'price-{mint}.json').write_text(json.dumps(data, indent=2) + '\n')
+              except Exception as e:
+                  prices[mint] = {'error':repr(e)}
+                  (root / f'price-{mint}.error.txt').write_text(repr(e) + '\n')
+              time.sleep(0.25)
+
+          for a in accounts:
+              meta = prices.get(a['mint'], {})
+              a.update(meta)
+              if 'price_usd' in meta:
+                  a['value_usd'] = a['ui_amount'] * meta['price_usd']
+
+          priced = [a for a in accounts if a.get('value_usd') is not None]
+          token2022_tf = [a for a in accounts if a['kind']=='token2022' and a.get('has_transfer_fee_config')]
+          token2022_tf_nonzero = [a for a in token2022_tf if a['raw_amount'] > 0]
+          token2022_tf_priced = [a for a in token2022_tf_nonzero if a.get('value_usd') is not None]
+          summary = {
+              'account_count': len(accounts),
+              'nonzero_count': len(nonzero),
+              'priced_nonzero_count': len([a for a in priced if a['raw_amount'] > 0]),
+              'total_priced_usd': sum(a['value_usd'] for a in priced),
+              'max_priced_usd': max([a['value_usd'] for a in priced] or [0]),
+              'token2022_transfer_fee_account_count': len(token2022_tf),
+              'token2022_transfer_fee_nonzero_count': len(token2022_tf_nonzero),
+              'token2022_transfer_fee_total_priced_usd': sum(a['value_usd'] for a in token2022_tf_priced),
+              'token2022_transfer_fee_max_priced_usd': max([a['value_usd'] for a in token2022_tf_priced] or [0]),
+          }
+          (root / 'accounts-normalized.json').write_text(json.dumps(accounts, indent=2) + '\n')
+          (root / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+          for threshold in [0, 1, 10, 100, 1000, 10000, 100000]:
+              if summary['token2022_transfer_fee_total_priced_usd'] > threshold:
+                  (root / f'TOKEN2022_TF_USD_GT_{threshold}.txt').write_text('PASS\n')
+          PY
+
+          find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: okx-solana-token2022-readonly-inventory
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
