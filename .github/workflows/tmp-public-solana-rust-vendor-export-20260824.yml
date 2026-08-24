@@ -32,11 +32,12 @@ jobs:
           cargo metadata --offline --locked --format-version 1 > ../artifact/cargo-metadata.json
           cargo test --offline --locked -p dex-solana --lib --no-run
           cd ..
+          rm -rf source/target
           printf '%s\n' "$commit" > artifact/source-commit.txt
           rustc --version > artifact/rustc-version.txt
           cargo --version > artifact/cargo-version.txt
 
-      - name: Package portable toolchain and vendored source
+      - name: Package portable toolchain and complete vendored source
         shell: bash
         run: |
           set -euo pipefail
@@ -44,7 +45,7 @@ jobs:
           printf '%s\n' "$sysroot" > artifact/original-sysroot.txt
           tar -I 'zstd -12 -T0' -cf artifact/rust-toolchain-1.85.1-linux-x86_64.tar.zst -C "$(dirname "$sysroot")" "$(basename "$sysroot")"
           tar -I 'zstd -12 -T0' -cf artifact/okx-solana-router-pinned-vendored-source.tar.zst \
-            --exclude='.git' --exclude='target' -C . source
+            --exclude='.git' -C . source
           find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
 
       - name: Upload public toolchain artifact
