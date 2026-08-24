@@ -1,0 +1,194 @@
+name: Temporary OKX exact-out read-only census 2026-08-24
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-exactout-census-trigger-20260824.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chain: ethereum
+            rpc: https://ethereum-rpc.publicnode.com
+            router: '0xa875Fb2204cE71679BE054d97f7fAFFeb6536D67'
+          - chain: arbitrum
+            rpc: https://arbitrum-one-rpc.publicnode.com
+            router: '0x9736d9a45115E33411390EbD54e5A5C3A6E25aA6'
+          - chain: base
+            rpc: https://base-rpc.publicnode.com
+            router: '0x77449Ff075C0A385796Da0762BCB46fd5cc884c6'
+          - chain: bsc
+            rpc: https://bsc-rpc.publicnode.com
+            router: '0x5cb43Bae4f36E2f9f858232B4Dce0dbE27bb85e3'
+
+    steps:
+      - name: Install pinned Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      - name: Capture public deployment metadata and balances
+        shell: bash
+        env:
+          CHAIN: ${{ matrix.chain }}
+          RPC_URL: ${{ matrix.rpc }}
+          ROUTER: ${{ matrix.router }}
+        run: |
+          set -euo pipefail
+          out="artifact/${CHAIN}"
+          mkdir -p "$out"
+
+          impl_slot='0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc'
+          admin_slot='0xb53127684a568b3173ae13b9f8a6016e0192b7f7a6e3c8e9d6a717850b5d6103'
+          transfer_topic='0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+          router_topic="0x000000000000000000000000${ROUTER#0x}"
+          router_topic="$(printf '%s' "$router_topic" | tr '[:upper:]' '[:lower:]')"
+
+          block="$(cast block-number --rpc-url "$RPC_URL")"
+          code="$(cast code "$ROUTER" --rpc-url "$RPC_URL")"
+          native="$(cast balance "$ROUTER" --rpc-url "$RPC_URL")"
+          impl_raw="$(cast storage "$ROUTER" "$impl_slot" --rpc-url "$RPC_URL")"
+          admin_raw="$(cast storage "$ROUTER" "$admin_slot" --rpc-url "$RPC_URL")"
+          implementation="0x${impl_raw:26:40}"
+          admin="0x${admin_raw:26:40}"
+          impl_code='0x'
+          if [ "${implementation,,}" != '0x0000000000000000000000000000000000000000' ]; then
+            impl_code="$(cast code "$implementation" --rpc-url "$RPC_URL")"
+          fi
+
+          {
+            printf 'chain\t%s\n' "$CHAIN"
+            printf 'rpc\t%s\n' "$RPC_URL"
+            printf 'block\t%s\n' "$block"
+            printf 'router\t%s\n' "$ROUTER"
+            printf 'router_code_bytes\t%s\n' "$(( (${#code} - 2) / 2 ))"
+            printf 'router_code_keccak\t%s\n' "$(cast keccak "$code")"
+            printf 'native_balance_wei\t%s\n' "$native"
+            printf 'implementation_raw\t%s\n' "$impl_raw"
+            printf 'implementation\t%s\n' "$implementation"
+            printf 'implementation_code_bytes\t%s\n' "$(( (${#impl_code} - 2) / 2 ))"
+            printf 'implementation_code_keccak\t%s\n' "$(cast keccak "$impl_code")"
+            printf 'admin_raw\t%s\n' "$admin_raw"
+            printf 'admin\t%s\n' "$admin"
+          } > "$out/deployment.tsv"
+
+          : > "$out/view-calls.tsv"
+          for sig in 'version()(string)' 'owner()(address)' 'paused()(bool)' 'admin()(address)'; do
+            safe="$(printf '%s' "$sig" | tr -c 'A-Za-z0-9' '_')"
+            if cast call "$ROUTER" "$sig" --rpc-url "$RPC_URL" > "$out/call-${safe}.txt" 2> "$out/call-${safe}.err"; then
+              printf '%s\tPASS\n' "$sig" >> "$out/view-calls.tsv"
+            else
+              printf '%s\tREVERT_OR_UNAVAILABLE\n' "$sig" >> "$out/view-calls.tsv"
+            fi
+          done
+
+          case "$CHAIN" in
+            ethereum)
+              cat > "$out/tokens.tsv" <<'TOKENS'
+          WETH	0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+          USDT	0xdAC17F958D2ee523a2206206994597C13D831ec7
+          USDC	0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+          DAI	0x6B175474E89094C44Da98b954EedeAC495271d0F
+          WBTC	0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599
+          stETH	0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84
+          wstETH	0x7f39C581F595B53c5cb5bDccC8c935E2Ca0aE2E3
+          USDe	0x4c9EDD5852cd905f086C759E8383e09bff1E68B3
+          sUSDe	0x9D39A5DE30e57443BfF2A8307A4256c8797A3497
+          cbBTC	0xcBb7C0000aB88B473b1f5aFd9ef808440eed33BF
+          weETH	0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee
+          rETH	0xae78736Cd615f374D3085123A210448E74Fc6393
+          TOKENS
+              ;;
+            arbitrum)
+              cat > "$out/tokens.tsv" <<'TOKENS'
+          WETH	0x82aF49447D8a07e3bd95BD0d56f35241523fBab1
+          USDC	0xaf88d065e77c8cC2239327C5EDb3A432268e5831
+          USDCe	0xFF970A61A04b1cA14834A43f5de4533eBDDB5CC8
+          USDT	0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9
+          DAI	0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1
+          WBTC	0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f
+          ARB	0x912CE59144191C1204E64559FE8253a0e49E6548
+          wstETH	0x5979D7b546E38E414F7E9822514be443A4800529
+          weETH	0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe
+          TOKENS
+              ;;
+            base)
+              cat > "$out/tokens.tsv" <<'TOKENS'
+          WETH	0x4200000000000000000000000000000000000006
+          USDC	0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+          USDbC	0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA
+          cbBTC	0xcBB7C0000aB88B473b1f5aFd9ef808440eed33BF
+          cbETH	0x2Ae3F1Ec7F1F5012CFEab0185bfcA06d3fC4a31F
+          DAI	0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb
+          AERO	0x940181a94A35A4569E4529A3CDfB74e38FD98631
+          EURC	0x60a3E35Cc302bfa44CB288Bc5a4F316Fdb1adb42
+          wstETH	0xc1CBa3fB43824cF40aC5cF1cCa6e9a0854f2D2C
+          weETH	0x04c0599Ae5A44757c0af6F9eaf2b3B3e04fC6cFc
+          TOKENS
+              ;;
+            bsc)
+              cat > "$out/tokens.tsv" <<'TOKENS'
+          WBNB	0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
+          USDT	0x55d398326f99059fF775485246999027B3197955
+          USDC	0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d
+          BTCB	0x7130d2A12B9BCbFae4f2634d864A1Ee1Ce3Ead9c
+          ETH	0x2170Ed0880ac9A755fd29B2688956BD959F933F8
+          FDUSD	0xc5f0f7B66764F6ec8C8DFF7ba683102295E16409
+          DAI	0x1AF3F329e8BE154074D8769D1FFa4eE058B1DBc3
+          CAKE	0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82
+          XVS	0xCf6BB5389c92Bdda8a3747Ddb454cB7a64626C63
+          TUSD	0x14016E85a25aeb13065688cAFB43044C2ef86784
+          TOKENS
+              ;;
+          esac
+
+          printf 'label\ttoken\traw_balance\tdecimals\n' > "$out/token-balances.tsv"
+          while IFS=$'\t' read -r label token; do
+            raw='CALL_FAILED'; decimals='UNKNOWN'
+            if v="$(cast call "$token" 'balanceOf(address)(uint256)' "$ROUTER" --rpc-url "$RPC_URL" 2>/dev/null)"; then raw="$v"; fi
+            if d="$(cast call "$token" 'decimals()(uint8)' --rpc-url "$RPC_URL" 2>/dev/null)"; then decimals="$d"; fi
+            printf '%s\t%s\t%s\t%s\n' "$label" "$token" "$raw" "$decimals" >> "$out/token-balances.tsv"
+          done < "$out/tokens.tsv"
+
+          start=$(( block > 50000 ? block - 50000 : 0 ))
+          : > "$out/recent-incoming-token-addresses.txt"
+          : > "$out/recent-log-errors.txt"
+          from=$start
+          while [ "$from" -le "$block" ]; do
+            to=$(( from + 4999 )); [ "$to" -gt "$block" ] && to=$block
+            filter="{\"fromBlock\":\"$(printf '0x%x' "$from")\",\"toBlock\":\"$(printf '0x%x' "$to")\",\"topics\":[\"${transfer_topic}\",null,\"${router_topic}\"]}"
+            if response="$(cast rpc --rpc-url "$RPC_URL" eth_getLogs "$filter" 2>> "$out/recent-log-errors.txt")"; then
+              printf '%s\n' "$response" | jq -r '.[].address // empty' >> "$out/recent-incoming-token-addresses.txt" || true
+            fi
+            from=$(( to + 1 ))
+          done
+          sort -fu "$out/recent-incoming-token-addresses.txt" -o "$out/recent-incoming-token-addresses.txt"
+
+          printf 'token\traw_balance\n' > "$out/recent-incoming-token-balances.tsv"
+          while IFS= read -r token; do
+            [ -n "$token" ] || continue
+            raw='CALL_FAILED'
+            if v="$(cast call "$token" 'balanceOf(address)(uint256)' "$ROUTER" --rpc-url "$RPC_URL" 2>/dev/null)"; then raw="$v"; fi
+            printf '%s\t%s\n' "$token" "$raw" >> "$out/recent-incoming-token-balances.tsv"
+          done < "$out/recent-incoming-token-addresses.txt"
+
+          sha256sum "$out"/* > "$out/SHA256SUMS.txt"
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: okx-exactout-readonly-census-${{ matrix.chain }}
+          path: artifact/${{ matrix.chain }}
+          retention-days: 1
+          if-no-files-found: error
