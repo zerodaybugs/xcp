@@ -1,0 +1,1 @@
+Temporary read-only inventory of the publicly identified OKX Solana shared authority through public Solana RPC. It enumerates SPL Token and Token-2022 accounts and parses mint extensions. No state-changing transaction, exploit attempt, vulnerability details, credentials, or customer data.
