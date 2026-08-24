@@ -42,43 +42,77 @@ jobs:
             > artifact/rest/deployer-resource-capability.txt
 
           cat > artifact/graphql/query-current-coin-balances.json <<EOF
-          {"query":"query CoinBalances(\$owner: String!) { current_coin_balances(where: {owner_address: {_eq: \$owner}}, order_by: {amount: desc}) { owner_address coin_type amount last_transaction_version last_transaction_timestamp } }","variables":{"owner":"$resource"}}
+          {"query":"query CoinBalances(\$owner: String!) { current_coin_balances(where: {owner_address: {_eq: \$owner}}) { owner_address coin_type amount last_transaction_version } }","variables":{"owner":"$resource"}}
           EOF
           cat > artifact/graphql/query-current-fa-balances.json <<EOF
-          {"query":"query FaBalances(\$owner: String!) { current_fungible_asset_balances(where: {owner_address: {_eq: \$owner}}, order_by: {amount: desc}) { owner_address asset_type amount storage_id is_primary is_frozen last_transaction_version last_transaction_timestamp } }","variables":{"owner":"$resource"}}
+          {"query":"query FaBalances(\$owner: String!) { current_fungible_asset_balances(where: {owner_address: {_eq: \$owner}}) { owner_address asset_type amount storage_id is_primary is_frozen last_transaction_version } }","variables":{"owner":"$resource"}}
           EOF
           cat > artifact/graphql/query-account-transactions.json <<EOF
           {"query":"query AccountTransactions(\$address: String!) { account_transactions(where: {account_address: {_eq: \$address}}, order_by: {transaction_version: desc}, limit: 200) { transaction_version account_address } }","variables":{"address":"$resource"}}
           EOF
           cat > artifact/graphql/query-order-events.json <<EOF
-          {"query":"query OrderEvents(\$type: String!) { events(where: {type: {_eq: \$type}}, order_by: {transaction_version: desc}, limit: 200) { transaction_version event_index account_address type data inserted_at } }","variables":{"type":"$package::aggregator::OrderRecord"}}
+          {"query":"query OrderEvents(\$type: String!) { events(where: {type: {_eq: \$type}}, order_by: {transaction_version: desc}, limit: 200) { transaction_version event_index account_address type data } }","variables":{"type":"$package::aggregator::OrderRecord"}}
           EOF
           cat > artifact/graphql/query-fa-metadata.json <<'EOF'
-          {"query":"query Metadata { fungible_asset_metadata(limit: 500, order_by: {last_transaction_version: desc}) { asset_type name symbol decimals last_transaction_version } }"}
+          {"query":"query Metadata { fungible_asset_metadata(limit: 500) { asset_type name symbol decimals last_transaction_version } }"}
+          EOF
+          cat > artifact/graphql/query-schema-root.json <<'EOF'
+          {"query":"query SchemaRoot { __schema { queryType { fields { name } } } }"}
           EOF
 
+          : > artifact/graphql/http-status.tsv
           for q in artifact/graphql/query-*.json; do
-            out="artifact/graphql/result-$(basename "$q" .json).json"
-            curl --fail --silent --show-error --retry 3 \
+            base="$(basename "$q" .json)"
+            out="artifact/graphql/result-${base}.json"
+            status="$(curl --silent --show-error --retry 3 \
+              -o "$out" -w '%{http_code}' \
               -H 'content-type: application/json' \
-              --data-binary "@$q" "$gql" > "$out"
+              --data-binary "@$q" "$gql" || true)"
+            printf '%s\t%s\n' "$base" "$status" >> artifact/graphql/http-status.tsv
           done
 
           python3 - <<'PY'
-          import hashlib, json, pathlib
+          import hashlib, json, pathlib, re
           root = pathlib.Path('artifact')
           resource = '0xf61e2e6ef691264f5c289caa52391faf5a89c801b565dbd4c4d225d3212fc5e4'
-          summary = {'resource_account': resource, 'coin_balances': [], 'fa_balances': [], 'graphql_errors': {}}
+          summary = {
+              'resource_account': resource,
+              'coin_balances': [],
+              'fa_balances': [],
+              'graphql_errors': {},
+              'rest_coin_stores': [],
+          }
           for kind, filename, key in [
               ('coin', root/'graphql/result-query-current-coin-balances.json', 'current_coin_balances'),
               ('fa', root/'graphql/result-query-current-fa-balances.json', 'current_fungible_asset_balances'),
           ]:
-              data = json.loads(filename.read_text())
+              try:
+                  data = json.loads(filename.read_text())
+              except Exception as exc:
+                  summary['graphql_errors'][kind] = [{'message': repr(exc)}]
+                  continue
               if data.get('errors'):
                   summary['graphql_errors'][kind] = data['errors']
               rows = ((data.get('data') or {}).get(key) or [])
               nonzero = [r for r in rows if int(r.get('amount') or 0) > 0]
               summary['coin_balances' if kind == 'coin' else 'fa_balances'] = nonzero
+
+          rest_file = root/'rest'/f'resources-{resource[2:]}.txt'
+          raw = rest_file.read_text(errors='replace')
+          body = raw.rsplit('\nHTTP_STATUS=', 1)[0]
+          try:
+              resources = json.loads(body)
+          except Exception as exc:
+              resources = []
+              summary['rest_parse_error'] = repr(exc)
+          for item in resources if isinstance(resources, list) else []:
+              typ = item.get('type', '')
+              if '::coin::CoinStore<' in typ:
+                  value = (((item.get('data') or {}).get('coin') or {}).get('value'))
+                  summary['rest_coin_stores'].append({'type': typ, 'value': value})
+          summary['rest_nonzero_coin_stores'] = [
+              r for r in summary['rest_coin_stores'] if int(r.get('value') or 0) > 0
+          ]
           (root/'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
           manifest = []
           for p in sorted(root.rglob('*')):
@@ -88,6 +122,7 @@ jobs:
           PY
 
       - name: Upload read-only census artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: aptos-resource-account-readonly-census
