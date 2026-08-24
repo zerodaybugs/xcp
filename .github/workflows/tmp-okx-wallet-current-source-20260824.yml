@@ -1,0 +1,39 @@
+name: Temporary OKX wallet current public source export 2026-08-24
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-wallet-current-source-trigger-20260824.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Export current exact public source and audit corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source artifact
+          git clone --recursive https://github.com/okxlabs/okx-smart-wallet-evm.git source/okx-smart-wallet-evm
+          commit="$(git -C source/okx-smart-wallet-evm rev-parse HEAD)"
+          branch="$(git -C source/okx-smart-wallet-evm symbolic-ref --short HEAD || true)"
+          printf '%s\n' "$commit" > artifact/current-main-commit.txt
+          printf '%s\n' "$branch" > artifact/current-branch.txt
+          git -C source/okx-smart-wallet-evm status --short > artifact/source-status.txt
+          git -C source/okx-smart-wallet-evm submodule status --recursive > artifact/submodules.txt || true
+          git -C source/okx-smart-wallet-evm log -n 30 --format='%H%x09%cI%x09%s' > artifact/recent-commits.tsv
+          tar --exclude='.git' --exclude='*/.git' -czf artifact/okx-smart-wallet-current-public-source.tar.gz -C source okx-smart-wallet-evm
+          find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: okx-wallet-current-public-source
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
