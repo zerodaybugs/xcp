@@ -1,1 +1,1 @@
-Temporary read-only census of a publicly documented Aptos package and its deterministic resource account. No vulnerability details, credentials, customer data, or state-changing transaction.
+Temporary read-only census of a publicly documented Aptos package and its deterministic resource account. No vulnerability details, credentials, customer data, or state-changing transaction. Rerun 2.
