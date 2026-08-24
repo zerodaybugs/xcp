@@ -1,0 +1,88 @@
+name: Temporary OKX wallet read-only deployment binding 2026-08-24
+
+on:
+  push:
+    branches:
+      - tmp-okx-wallet-binding-20260824
+    paths:
+      - .tmp/okx-wallet-binding-trigger-20260824.txt
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  binding:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chain: ethereum
+            rpc: https://ethereum-rpc.publicnode.com
+          - chain: base
+            rpc: https://base-rpc.publicnode.com
+          - chain: arbitrum
+            rpc: https://arbitrum-one-rpc.publicnode.com
+          - chain: optimism
+            rpc: https://optimism-rpc.publicnode.com
+          - chain: bsc
+            rpc: https://bsc-rpc.publicnode.com
+          - chain: polygon
+            rpc: https://polygon-bor-rpc.publicnode.com
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tmp-okx-wallet-binding-20260824
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - name: Capture public read-only deployment data
+        shell: bash
+        env:
+          CHAIN_NAME: ${{ matrix.chain }}
+          RPC_URL: ${{ matrix.rpc }}
+        run: |
+          set -euo pipefail
+          factory='0xDd3FEa01cD550C9EFfC893f346690b9A649f35EF'
+          entry='0xe40ccB2D94975c51bff0C004eFDfd9B3a5796fA4'
+          out=".tmp-results/okx-wallet-binding-20260824/${CHAIN_NAME}"
+          mkdir -p "$out"
+          block="$(cast block-number --rpc-url "$RPC_URL")"
+          impl="$(cast call "$factory" 'IMPLEMENTATION()(address)' --rpc-url "$RPC_URL")"
+          factory_code="$(cast code "$factory" --rpc-url "$RPC_URL")"
+          entry_code="$(cast code "$entry" --rpc-url "$RPC_URL")"
+          impl_code="$(cast code "$impl" --rpc-url "$RPC_URL")"
+          printf '%s\n' "$factory_code" > "$out/factory.hex"
+          printf '%s\n' "$entry_code" > "$out/entry.hex"
+          printf '%s\n' "$impl_code" > "$out/implementation.hex"
+          {
+            printf 'chain\t%s\n' "$CHAIN_NAME"
+            printf 'rpc\t%s\n' "$RPC_URL"
+            printf 'block\t%s\n' "$block"
+            printf 'factory\t%s\n' "$factory"
+            printf 'entry\t%s\n' "$entry"
+            printf 'implementation\t%s\n' "$impl"
+            printf 'factory_code_bytes\t%s\n' "$(( (${#factory_code}-2)/2 ))"
+            printf 'entry_code_bytes\t%s\n' "$(( (${#entry_code}-2)/2 ))"
+            printf 'implementation_code_bytes\t%s\n' "$(( (${#impl_code}-2)/2 ))"
+            printf 'factory_code_keccak\t%s\n' "$(cast keccak "$factory_code")"
+            printf 'entry_code_keccak\t%s\n' "$(cast keccak "$entry_code")"
+            printf 'implementation_code_keccak\t%s\n' "$(cast keccak "$impl_code")"
+          } > "$out/summary.tsv"
+          sha256sum "$out"/* > "$out/SHA256SUMS.txt"
+      - name: Commit result snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .tmp-results/okx-wallet-binding-20260824
+          git commit -m "ci: record temporary OKX wallet deployment binding ${{ matrix.chain }}" || exit 0
+          for attempt in 1 2 3 4 5; do
+            git pull --rebase origin tmp-okx-wallet-binding-20260824 || true
+            if git push origin HEAD:tmp-okx-wallet-binding-20260824; then exit 0; fi
+            sleep $((attempt * 2))
+          done
+          exit 1
