@@ -1,0 +1,43 @@
+name: Temporary public OKX Move source export 2026-08-24
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-move-source-export-trigger-20260824.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Clone pinned public Sui and Aptos sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          sui_commit='30843f92ad6ec86e7418d41df1a630ad53ff4262'
+          aptos_commit='c78b8b9d4266e5d28587bb80590eb18cf15471fd'
+          mkdir -p source artifact
+          git clone --filter=blob:none https://github.com/okxlabs/Web3-DEX-Router-Sui-V1.git source/sui
+          git -C source/sui checkout --detach "$sui_commit"
+          test "$(git -C source/sui rev-parse HEAD)" = "$sui_commit"
+          git clone --filter=blob:none https://github.com/okxlabs/Web3-DEX-Router-Aptos-V1.git source/aptos
+          git -C source/aptos checkout --detach "$aptos_commit"
+          test "$(git -C source/aptos rev-parse HEAD)" = "$aptos_commit"
+          printf '%s\n' "$sui_commit" > artifact/sui-commit.txt
+          printf '%s\n' "$aptos_commit" > artifact/aptos-commit.txt
+          tar -I 'zstd -12 -T0' -cf artifact/okx-move-pinned-public-sources.tar.zst \
+            --exclude='.git' -C source sui aptos
+          find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
+
+      - name: Upload public source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: okx-move-pinned-public-sources
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
