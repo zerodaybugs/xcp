@@ -1,0 +1,46 @@
+name: Temporary OKX scoped source export 2026-08-24
+
+on:
+  push:
+    paths:
+      - .github/workflows/tmp-okx-scoped-source-export-20260824.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Export exact public scoped sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source artifact
+
+          clone_pin() {
+            local repo="$1" dir="$2" commit="$3"
+            git clone --filter=blob:none "https://github.com/${repo}.git" "source/${dir}"
+            git -C "source/${dir}" checkout --detach "$commit"
+            test "$(git -C "source/${dir}" rev-parse HEAD)" = "$commit"
+            git -C "source/${dir}" submodule update --init --recursive || true
+            printf '%s\t%s\t%s\n' "$repo" "$commit" "$(git -C "source/${dir}" rev-parse HEAD)" >> artifact/PINS.tsv
+            git -C "source/${dir}" status --short > "artifact/${dir}-status.txt"
+          }
+
+          clone_pin okxlabs/Boost-TokenDistributor-EVM boost-distributor-evm 92ff7745906372411495d79f384b502fe3d19a75
+          clone_pin okxlabs/Boost-Token-Locker boost-token-locker ae2d55214245e5f405b7eaf7da43f8cbd1e82b08
+          clone_pin okxlabs/Web3-DEX-Router-Sui-V1 dex-router-sui 30843f92ad6ec86e7418d41df1a630ad53ff4262
+          clone_pin okxlabs/Web3-DEX-Router-Aptos-V1 dex-router-aptos c78b8b9d4266e5d28587bb80590eb18cf15471fd
+
+          tar --exclude='.git' --exclude='*/.git' -czf artifact/okx-scoped-targets-exact-source.tar.gz -C source .
+          find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: okx-scoped-targets-exact-source
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
