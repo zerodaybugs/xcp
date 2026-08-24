@@ -1,0 +1,120 @@
+[
+  {
+    "kind": "spl",
+    "token_account": "BriVDrcS1eEzBuSAPrPt4SRQN6Pvq7AVZGZYciJLVST7",
+    "mint": "2dSqHoeoPmXHXphGno8wxSKx5Go3ENtvPdDMmnWjkvVp",
+    "raw_amount": 0,
+    "decimals": 9,
+    "ui_amount": 0.0
+  },
+  {
+    "kind": "spl",
+    "token_account": "8PigjYrRFXEYeYfDkXP92fZ9UgnLxhkRjfr5oz3koMrv",
+    "mint": "3P8HmzyAj9XFbujz2r7nwrYZEk6nttESWkBCEEXnbonk",
+    "raw_amount": 0,
+    "decimals": 6,
+    "ui_amount": 0.0
+  },
+  {
+    "kind": "spl",
+    "token_account": "EMaCrw3LyCTBVKjSJRhjCb8MBqqcomYg5L4kDz1aqewk",
+    "mint": "67L7oi9z8gfexWuswNC2FaSpg8CVDm3T4AcD6aZxcrwk",
+    "raw_amount": 0,
+    "decimals": 9,
+    "ui_amount": 0.0
+  },
+  {
+    "kind": "spl",
+    "token_account": "BPKK7vBrnGSL6gg6FXTC8Bx3wXAgs2LvpGYjrjyiSCQQ",
+    "mint": "777JnfmcmwKbuKMTXCsbh8k4YdVt75yyyD776YLnbonk",
+    "raw_amount": 0,
+    "decimals": 6,
+    "ui_amount": 0.0
+  },
+  {
+    "kind": "spl",
+    "token_account": "2PzqaDUqYn27Jt5XTXopMBMSUTf9QUM9k1KkofKvww1p",
+    "mint": "8pA6xS92T699bNv2FTbXbuJSV8Jkz3mRa7GMEpHABAGS",
+    "raw_amount": 0,
+    "decimals": 6,
+    "ui_amount": 0.0
+  },
+  {
+    "kind": "spl",
+    "token_account": "DktwutiAkc3kVjo9M7YE2KW7QzZXF8nMqbPNszxLTpjK",
+    "mint": "Bj6KoPQfRxpFxMvhGWWbUwAC987z1bVodcq7FH2smj7K",
+    "raw_amount": 0,
+    "decimals": 9,
+    "ui_amount": 0.0
+  },
+  {
+    "kind": "spl",
+    "token_account": "2vsdsfdhMr4TdEZLHG1HCMwGH7bQGVViHy8SMzqwDaH6",
+    "mint": "GCCX7HJ8b5E37hwVyvMh7kH3FB74eumwGGxWvwgyZY6M",
+    "raw_amount": 10000000000000,
+    "decimals": 9,
+    "ui_amount": 10000.0,
+    "mint_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "extensions": [],
+    "has_transfer_fee_config": false,
+    "price_usd": null,
+    "liquidity_usd": null,
+    "pair": null,
+    "dex": null,
+    "value_usd": null
+  },
+  {
+    "kind": "spl",
+    "token_account": "3YchNbvR8NgLjoQutXW3hDXZp8FNBYKn1ZJAq26YimaN",
+    "mint": "GyoKikK8AuHhnv3xyECyvwtGMtMvJkn6UMPPGMnxbkTN",
+    "raw_amount": 0,
+    "decimals": 9,
+    "ui_amount": 0.0
+  },
+  {
+    "kind": "spl",
+    "token_account": "3cTVKwQds8N2yc1PZPHmX7JNjETjm1qg8xZG4zqo7sSQ",
+    "mint": "HJ1f1vRwb8ztGke5CqPutExkXbVaSKEJvBVifoRPYSrq",
+    "raw_amount": 0,
+    "decimals": 9,
+    "ui_amount": 0.0
+  },
+  {
+    "kind": "token2022",
+    "token_account": "CRyqvyZi3aoeRBUMvG2i1oDv2st6FdZNpocmGf4ew1ak",
+    "mint": "8B3UJbbPWfg2DLF7iWzm9WnXH9y5jhYUUoZaLhqvpump",
+    "raw_amount": 10000000,
+    "decimals": 6,
+    "ui_amount": 10.0,
+    "mint_program": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "extensions": [
+      "metadataPointer",
+      "tokenMetadata"
+    ],
+    "has_transfer_fee_config": false,
+    "price_usd": 2.863e-05,
+    "liquidity_usd": 17930.13,
+    "pair": "3nwzFjN3s1hE8CgqQED7S5JtREcCLStdkhRvLJvf7Uwp",
+    "dex": "pumpswap",
+    "value_usd": 0.00028629999999999997
+  },
+  {
+    "kind": "token2022",
+    "token_account": "ddjAwEX3iqPcJozcLQPj7pwLWeoZGNrqkE8wYFv6F5j",
+    "mint": "CLmUnekzkn37Zvut6S7VP5c76MmymLuG8cTUWpzHpump",
+    "raw_amount": 20000000000,
+    "decimals": 6,
+    "ui_amount": 20000.0,
+    "mint_program": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "extensions": [
+      "metadataPointer",
+      "tokenMetadata"
+    ],
+    "has_transfer_fee_config": false,
+    "price_usd": 2.037e-06,
+    "liquidity_usd": 3759.65,
+    "pair": "C57fAjpR4oT5RpEnwSQeTftQmcA2iVc5G8EDvZ66Pt3L",
+    "dex": "pumpswap",
+    "value_usd": 0.040740000000000005
+  }
+]
