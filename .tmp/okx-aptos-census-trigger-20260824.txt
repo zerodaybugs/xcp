@@ -1,0 +1,1 @@
+Temporary read-only Aptos mainnet census of an officially documented scoped deployment. No state-changing transaction, exploit attempt, credentials, or customer data.
