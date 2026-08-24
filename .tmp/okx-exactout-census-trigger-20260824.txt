@@ -1,0 +1,1 @@
+Temporary read-only census of public, officially advertised OKX exact-out router deployments. It captures code metadata, proxy slots, view calls, major-token balances, and bounded recent incoming ERC-20 transfer tokens through public RPC. No state-changing transaction, exploit attempt, credentials, customer data, or vulnerability details.
