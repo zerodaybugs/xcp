@@ -1,0 +1,106 @@
+name: Temporary committed OKX Solana Token-2022 inventory 2026-08-24
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-solana-token2022-inventory-trigger-v2-20260824.txt
+
+permissions:
+  contents: write
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Query public Solana state and public price metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/okx-sol-inventory
+          mkdir -p /tmp/okx-sol-inventory
+          rpc='https://api.mainnet-beta.solana.com'
+          owner='HV1KXxWFaSeriyFvXyx48FqG9BoFbfinB8njCJonqP7K'
+
+          curl --fail --silent --show-error --retry 4 -H 'content-type: application/json' \
+            --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBalance\",\"params\":[\"${owner}\",{\"commitment\":\"confirmed\"}]}" \
+            "$rpc" > /tmp/okx-sol-inventory/owner-balance.json
+          for pair in \
+            'spl:TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' \
+            'token2022:TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'; do
+            kind="${pair%%:*}"; program="${pair#*:}"
+            curl --fail --silent --show-error --retry 4 -H 'content-type: application/json' \
+              --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getTokenAccountsByOwner\",\"params\":[\"${owner}\",{\"programId\":\"${program}\"},{\"encoding\":\"jsonParsed\",\"commitment\":\"confirmed\"}]}" \
+              "$rpc" > "/tmp/okx-sol-inventory/${kind}-accounts.json"
+          done
+
+          python3 - <<'PY'
+          import json, pathlib, time, urllib.request, urllib.parse
+          root = pathlib.Path('/tmp/okx-sol-inventory')
+          accounts=[]
+          for kind in ('spl','token2022'):
+              obj=json.loads((root/f'{kind}-accounts.json').read_text())
+              for row in obj.get('result',{}).get('value',[]):
+                  info=row['account']['data']['parsed']['info']; ta=info['tokenAmount']
+                  accounts.append({'kind':kind,'token_account':row['pubkey'],'mint':info['mint'],'owner':info['owner'],'raw_amount':int(ta['amount']),'decimals':int(ta['decimals']),'ui_amount':float(ta['uiAmountString'])})
+          mints=sorted({a['mint'] for a in accounts if a['raw_amount']>0})
+          for mint in mints:
+              payload=json.dumps({'jsonrpc':'2.0','id':1,'method':'getAccountInfo','params':[mint,{'encoding':'jsonParsed','commitment':'confirmed'}]}).encode()
+              req=urllib.request.Request('https://api.mainnet-beta.solana.com',data=payload,headers={'content-type':'application/json','user-agent':'Mozilla/5.0'})
+              has_tf=False; mint_program=None
+              try:
+                  with urllib.request.urlopen(req,timeout=20) as r: data=json.load(r)
+                  value=data.get('result',{}).get('value') or {}; mint_program=value.get('owner')
+                  parsed=(value.get('data') or {}).get('parsed') or {}; info=parsed.get('info') or {}
+                  ext=info.get('extensions') or []
+                  has_tf=any(isinstance(e,dict) and str(e.get('extension','')).lower()=='transferfeeconfig' for e in ext)
+              except Exception:
+                  pass
+              price=None; liquidity=None; pair=None; dex=None
+              try:
+                  req=urllib.request.Request('https://api.dexscreener.com/latest/dex/tokens/'+urllib.parse.quote(mint),headers={'user-agent':'Mozilla/5.0'})
+                  with urllib.request.urlopen(req,timeout=20) as r: pdata=json.load(r)
+                  viable=[]
+                  for p in pdata.get('pairs') or []:
+                      try:
+                          pr=float(p.get('priceUsd') or 0); liq=float((p.get('liquidity') or {}).get('usd') or 0)
+                          if pr>0: viable.append((liq,pr,p.get('pairAddress'),p.get('dexId')))
+                      except Exception: pass
+                  if viable:
+                      viable.sort(reverse=True); liquidity,price,pair,dex=viable[0]
+              except Exception:
+                  pass
+              for a in accounts:
+                  if a['mint']==mint:
+                      a.update({'mint_program':mint_program,'has_transfer_fee_config':has_tf,'price_usd':price,'liquidity_usd':liquidity,'pair':pair,'dex':dex,'value_usd':a['ui_amount']*price if price is not None else None})
+              time.sleep(.2)
+          nz=[a for a in accounts if a['raw_amount']>0]
+          tf=[a for a in nz if a['kind']=='token2022' and a.get('has_transfer_fee_config')]
+          priced=[a for a in nz if a.get('value_usd') is not None]
+          tfpriced=[a for a in tf if a.get('value_usd') is not None]
+          bal=json.loads((root/'owner-balance.json').read_text()).get('result',{}).get('value')
+          summary={'owner_lamports':bal,'account_count':len(accounts),'nonzero_count':len(nz),'priced_nonzero_count':len(priced),'total_priced_usd':sum(a['value_usd'] for a in priced),'max_priced_usd':max([a['value_usd'] for a in priced] or [0]),'token2022_transfer_fee_nonzero_count':len(tf),'token2022_transfer_fee_priced_count':len(tfpriced),'token2022_transfer_fee_total_priced_usd':sum(a['value_usd'] for a in tfpriced),'token2022_transfer_fee_max_priced_usd':max([a['value_usd'] for a in tfpriced] or [0])}
+          (root/'accounts-normalized.json').write_text(json.dumps(accounts,indent=2)+'\n')
+          (root/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+          PY
+
+      - name: Commit compact result to temporary branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest='.tmp-results/okx-solana-token2022-inventory-20260824'
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          cp /tmp/okx-sol-inventory/summary.json "$dest/"
+          cp /tmp/okx-sol-inventory/accounts-normalized.json "$dest/"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$dest"
+          git commit -m 'test: record temporary OKX Solana Token-2022 public inventory'
+          git push origin HEAD:${{ github.head_ref }}
