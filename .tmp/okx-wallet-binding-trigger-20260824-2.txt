@@ -1,0 +1,1 @@
+Temporary marker only; no vulnerability details or state-changing interaction.
