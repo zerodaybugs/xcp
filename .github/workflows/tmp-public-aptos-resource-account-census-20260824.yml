@@ -1,0 +1,96 @@
+name: Temporary public Aptos resource-account census 2026-08-24
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/aptos-resource-account-census-trigger-20260824.txt
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Capture read-only mainnet account and balance metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          rest='https://api.mainnet.aptoslabs.com/v1'
+          gql='https://api.mainnet.aptoslabs.com/v1/graphql'
+          package='0xd7ed3ceeb92c4e5a413e8ad7fab83ced12bf4141a49248a91b5485cb45a0ef4b'
+          deployer='0x14b2864b0df3553a864dc8560925309ff05bde4dec5a731b54e6f3cee541ef91'
+          resource='0xf61e2e6ef691264f5c289caa52391faf5a89c801b565dbd4c4d225d3212fc5e4'
+          mkdir -p artifact/rest artifact/graphql
+
+          curl --fail --silent --show-error --retry 3 "$rest" > artifact/rest/ledger.json
+          for address in "$package" "$deployer" "$resource"; do
+            short="${address#0x}"
+            curl --silent --show-error --retry 3 -w '\nHTTP_STATUS=%{http_code}\n' \
+              "$rest/accounts/$address" > "artifact/rest/account-${short}.txt"
+            curl --silent --show-error --retry 3 -w '\nHTTP_STATUS=%{http_code}\n' \
+              "$rest/accounts/$address/resources?limit=1000" > "artifact/rest/resources-${short}.txt"
+          done
+
+          curl --silent --show-error --retry 3 -w '\nHTTP_STATUS=%{http_code}\n' \
+            "$rest/accounts/$package/modules?limit=1000" > artifact/rest/package-modules.txt
+          curl --silent --show-error --retry 3 -w '\nHTTP_STATUS=%{http_code}\n' \
+            "$rest/accounts/$deployer/resource/$package%3A%3Aproxy%3A%3AResourceAccount" \
+            > artifact/rest/deployer-resource-capability.txt
+
+          cat > artifact/graphql/query-current-coin-balances.json <<EOF
+          {"query":"query CoinBalances(\$owner: String!) { current_coin_balances(where: {owner_address: {_eq: \$owner}}, order_by: {amount: desc}) { owner_address coin_type amount last_transaction_version last_transaction_timestamp } }","variables":{"owner":"$resource"}}
+          EOF
+          cat > artifact/graphql/query-current-fa-balances.json <<EOF
+          {"query":"query FaBalances(\$owner: String!) { current_fungible_asset_balances(where: {owner_address: {_eq: \$owner}}, order_by: {amount: desc}) { owner_address asset_type amount storage_id is_primary is_frozen last_transaction_version last_transaction_timestamp } }","variables":{"owner":"$resource"}}
+          EOF
+          cat > artifact/graphql/query-account-transactions.json <<EOF
+          {"query":"query AccountTransactions(\$address: String!) { account_transactions(where: {account_address: {_eq: \$address}}, order_by: {transaction_version: desc}, limit: 200) { transaction_version account_address } }","variables":{"address":"$resource"}}
+          EOF
+          cat > artifact/graphql/query-order-events.json <<EOF
+          {"query":"query OrderEvents(\$type: String!) { events(where: {type: {_eq: \$type}}, order_by: {transaction_version: desc}, limit: 200) { transaction_version event_index account_address type data inserted_at } }","variables":{"type":"$package::aggregator::OrderRecord"}}
+          EOF
+          cat > artifact/graphql/query-fa-metadata.json <<'EOF'
+          {"query":"query Metadata { fungible_asset_metadata(limit: 500, order_by: {last_transaction_version: desc}) { asset_type name symbol decimals last_transaction_version } }"}
+          EOF
+
+          for q in artifact/graphql/query-*.json; do
+            out="artifact/graphql/result-$(basename "$q" .json).json"
+            curl --fail --silent --show-error --retry 3 \
+              -H 'content-type: application/json' \
+              --data-binary "@$q" "$gql" > "$out"
+          done
+
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          root = pathlib.Path('artifact')
+          resource = '0xf61e2e6ef691264f5c289caa52391faf5a89c801b565dbd4c4d225d3212fc5e4'
+          summary = {'resource_account': resource, 'coin_balances': [], 'fa_balances': [], 'graphql_errors': {}}
+          for kind, filename, key in [
+              ('coin', root/'graphql/result-query-current-coin-balances.json', 'current_coin_balances'),
+              ('fa', root/'graphql/result-query-current-fa-balances.json', 'current_fungible_asset_balances'),
+          ]:
+              data = json.loads(filename.read_text())
+              if data.get('errors'):
+                  summary['graphql_errors'][kind] = data['errors']
+              rows = ((data.get('data') or {}).get(key) or [])
+              nonzero = [r for r in rows if int(r.get('amount') or 0) > 0]
+              summary['coin_balances' if kind == 'coin' else 'fa_balances'] = nonzero
+          (root/'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+          manifest = []
+          for p in sorted(root.rglob('*')):
+              if p.is_file() and p.name != 'SHA256SUMS.txt':
+                  manifest.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.as_posix()}")
+          (root/'SHA256SUMS.txt').write_text('\n'.join(manifest) + '\n')
+          PY
+
+      - name: Upload read-only census artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aptos-resource-account-readonly-census
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
