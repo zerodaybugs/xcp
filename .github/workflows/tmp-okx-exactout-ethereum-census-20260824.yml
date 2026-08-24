@@ -1,0 +1,114 @@
+name: Temporary OKX exact-out Ethereum read-only census 2026-08-24
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-exactout-ethereum-trigger-20260824.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      - name: Capture public Ethereum deployment metadata and balances
+        shell: bash
+        env:
+          RPC_URL: https://ethereum-rpc.publicnode.com
+          ROUTER: '0xa875Fb2204cE71679BE054d97f7fAFFeb6536D67'
+        run: |
+          set -euo pipefail
+          out='artifact/ethereum'
+          mkdir -p "$out"
+          impl_slot='0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc'
+          admin_slot='0xb53127684a568b3173ae13b9f8a6016e0192b7f7a6e3c8e9d6a717850b5d6103'
+          transfer_topic='0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+          router_topic="0x000000000000000000000000${ROUTER#0x}"
+          router_topic="${router_topic,,}"
+
+          block="$(cast block-number --rpc-url "$RPC_URL")"
+          code="$(cast code "$ROUTER" --rpc-url "$RPC_URL")"
+          native="$(cast balance "$ROUTER" --rpc-url "$RPC_URL")"
+          impl_raw="$(cast storage "$ROUTER" "$impl_slot" --rpc-url "$RPC_URL")"
+          admin_raw="$(cast storage "$ROUTER" "$admin_slot" --rpc-url "$RPC_URL")"
+          {
+            printf 'network\tethereum\n'
+            printf 'block\t%s\n' "$block"
+            printf 'router\t%s\n' "$ROUTER"
+            printf 'router_code_bytes\t%s\n' "$(( (${#code} - 2) / 2 ))"
+            printf 'router_code_keccak\t%s\n' "$(cast keccak "$code")"
+            printf 'native_balance_wei\t%s\n' "$native"
+            printf 'implementation_raw\t%s\n' "$impl_raw"
+            printf 'admin_raw\t%s\n' "$admin_raw"
+          } > "$out/deployment.tsv"
+
+          : > "$out/view-calls.tsv"
+          for sig in 'version()(string)' 'owner()(address)' 'paused()(bool)' 'admin()(address)'; do
+            safe="$(printf '%s' "$sig" | tr -c 'A-Za-z0-9' '_')"
+            if cast call "$ROUTER" "$sig" --rpc-url "$RPC_URL" > "$out/call-${safe}.txt" 2> "$out/call-${safe}.err"; then
+              printf '%s\tPASS\n' "$sig" >> "$out/view-calls.tsv"
+            else
+              printf '%s\tREVERT_OR_UNAVAILABLE\n' "$sig" >> "$out/view-calls.tsv"
+            fi
+          done
+
+          cat > "$out/tokens.tsv" <<'TOKENS'
+          WETH	0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+          USDT	0xdAC17F958D2ee523a2206206994597C13D831ec7
+          USDC	0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+          DAI	0x6B175474E89094C44Da98b954EedeAC495271d0F
+          WBTC	0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599
+          stETH	0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84
+          wstETH	0x7f39C581F595B53c5cb5bDccC8c935E2Ca0aE2E3
+          USDe	0x4c9EDD5852cd905f086C759E8383e09bff1E68B3
+          sUSDe	0x9D39A5DE30e57443BfF2A8307A4256c8797A3497
+          cbBTC	0xcBb7C0000aB88B473b1f5aFd9ef808440eed33BF
+          weETH	0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee
+          rETH	0xae78736Cd615f374D3085123A210448E74Fc6393
+          TOKENS
+
+          printf 'label\ttoken\traw_balance\tdecimals\n' > "$out/token-balances.tsv"
+          while IFS=$'\t' read -r label token; do
+            raw='CALL_FAILED'; decimals='UNKNOWN'
+            if v="$(cast call "$token" 'balanceOf(address)(uint256)' "$ROUTER" --rpc-url "$RPC_URL" 2>/dev/null)"; then raw="$v"; fi
+            if d="$(cast call "$token" 'decimals()(uint8)' --rpc-url "$RPC_URL" 2>/dev/null)"; then decimals="$d"; fi
+            printf '%s\t%s\t%s\t%s\n' "$label" "$token" "$raw" "$decimals" >> "$out/token-balances.tsv"
+          done < "$out/tokens.tsv"
+
+          start=$(( block > 100000 ? block - 100000 : 0 ))
+          : > "$out/recent-incoming-token-addresses.txt"
+          : > "$out/recent-log-errors.txt"
+          from=$start
+          while [ "$from" -le "$block" ]; do
+            to=$(( from + 4999 )); [ "$to" -gt "$block" ] && to=$block
+            filter="{\"fromBlock\":\"$(printf '0x%x' "$from")\",\"toBlock\":\"$(printf '0x%x' "$to")\",\"topics\":[\"${transfer_topic}\",null,\"${router_topic}\"]}"
+            if response="$(cast rpc --rpc-url "$RPC_URL" eth_getLogs "$filter" 2>> "$out/recent-log-errors.txt")"; then
+              printf '%s\n' "$response" | jq -r '.[].address // empty' >> "$out/recent-incoming-token-addresses.txt" || true
+            fi
+            from=$(( to + 1 ))
+          done
+          sort -fu "$out/recent-incoming-token-addresses.txt" -o "$out/recent-incoming-token-addresses.txt"
+          printf 'token\traw_balance\n' > "$out/recent-incoming-token-balances.tsv"
+          while IFS= read -r token; do
+            [ -n "$token" ] || continue
+            raw='CALL_FAILED'
+            if v="$(cast call "$token" 'balanceOf(address)(uint256)' "$ROUTER" --rpc-url "$RPC_URL" 2>/dev/null)"; then raw="$v"; fi
+            printf '%s\t%s\n' "$token" "$raw" >> "$out/recent-incoming-token-balances.tsv"
+          done < "$out/recent-incoming-token-addresses.txt"
+          sha256sum "$out"/* > "$out/SHA256SUMS.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: okx-exactout-readonly-census-ethereum
+          path: artifact/ethereum
+          retention-days: 1
+          if-no-files-found: error
