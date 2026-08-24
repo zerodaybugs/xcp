@@ -4,6 +4,11 @@ on:
   push:
     paths:
       - .github/workflows/tmp-okx-scoped-source-export-20260824.yml
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-scoped-source-export-trigger-20260824.txt
   workflow_dispatch:
 
 permissions:
