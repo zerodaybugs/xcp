@@ -1,0 +1,48 @@
+name: Temporary exact OKX Solana source export 2026-08-24
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-solana-source-export-trigger-20260824.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Export exact public source snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source artifact
+          router_commit='677d3eced859d12629e354eb320ab301710002e5'
+          boost_commit='9ea1ae6c87303d81f6a8476b9f0e18eded03d449'
+
+          git clone https://github.com/okxlabs/Web3-DEX-Router-Solana-V1.git source/router-solana
+          git -C source/router-solana checkout --detach "$router_commit"
+          test "$(git -C source/router-solana rev-parse HEAD)" = "$router_commit"
+
+          git clone https://github.com/okxlabs/Boost-TokenDistributor-Solana.git source/boost-solana
+          git -C source/boost-solana checkout --detach "$boost_commit"
+          test "$(git -C source/boost-solana rev-parse HEAD)" = "$boost_commit"
+
+          printf '%s\n' "$router_commit" > artifact/router-solana-commit.txt
+          printf '%s\n' "$boost_commit" > artifact/boost-solana-commit.txt
+          git -C source/router-solana status --short > artifact/router-solana-status.txt
+          git -C source/boost-solana status --short > artifact/boost-solana-status.txt
+
+          tar --exclude='.git' --exclude='*/.git' -czf artifact/okx-solana-exact-public-sources.tar.gz -C source router-solana boost-solana
+          sha256sum artifact/* > artifact/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: okx-solana-exact-public-sources
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
