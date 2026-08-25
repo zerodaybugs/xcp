@@ -1,0 +1,1 @@
+Temporary read-only capture of public state for currently scoped Citrea contracts and their LayerZero peer matrix. No vulnerability details, credentials, customer data, exploit traffic, or state-changing transaction.
