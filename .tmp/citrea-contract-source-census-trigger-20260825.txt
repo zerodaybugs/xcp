@@ -1,0 +1,1 @@
+Temporary read-only export of public runtime/source metadata for currently scoped Citrea contracts. No vulnerability details, credentials, customer data, exploit traffic, or state-changing transaction.
