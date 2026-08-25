@@ -1,0 +1,39 @@
+name: Temporary public solc 0.8.33 export 2026-08-25
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/solc-0.8.33-export-trigger-20260825.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify official solc 0.8.33
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          curl --fail --location --retry 3 \
+            https://github.com/argotorg/solidity/releases/download/v0.8.33/solc-static-linux \
+            -o artifact/solc-0.8.33
+          chmod +x artifact/solc-0.8.33
+          artifact/solc-0.8.33 --version | tee artifact/solc-version.txt
+          printf '%s  %s\n' \
+            '1274e5c4621ae478090c5a1f48466fd3c5f658ed9e14b15a0b213dc806215468' \
+            'artifact/solc-0.8.33' | sha256sum --check
+          sha256sum artifact/* > artifact/SHA256SUMS.txt
+
+      - name: Upload public compiler artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-solc-0.8.33-linux-amd64
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
