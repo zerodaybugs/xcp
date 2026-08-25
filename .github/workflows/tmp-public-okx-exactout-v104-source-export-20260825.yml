@@ -1,0 +1,45 @@
+name: Temporary public OKX Exact-Out v1.0.4 source export 2026-08-25
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-exactout-v104-source-export-trigger-20260825.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Clone pinned public historical source
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit='e3ce0d5be8e8f009c93f7e31847341e885f028fa'
+          git clone --filter=blob:none https://github.com/okxlabs/Web3-DEX-Router-EVM-V1.git source
+          git -C source checkout --detach "$commit"
+          test "$(git -C source rev-parse HEAD)" = "$commit"
+          git -C source submodule update --init --recursive
+          mkdir -p artifact
+          printf '%s\n' "$commit" > artifact/source-commit.txt
+          grep -n 'string public constant version' source/contracts/8/DexRouterExactOut.sol > artifact/version-source-line.txt
+
+      - name: Package public source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf source/.git
+          tar -I 'zstd -12 -T0' -cf artifact/okx-exactout-v104-pinned-public-source.tar.zst source
+          find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
+
+      - name: Upload public source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: okx-exactout-v104-pinned-public-source
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
