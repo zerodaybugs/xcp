@@ -1,0 +1,1 @@
+Temporary export of the pinned public historical OKX Exact-Out source for reproducible offline validation. No vulnerability details, credentials, customer data, or production interaction.
