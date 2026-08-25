@@ -1,0 +1,235 @@
+name: Temporary public Citrea live state matrix 2026-08-25
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/citrea-live-state-matrix-trigger-20260825.txt
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Capture public read-only contract state
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/citrea-state
+          mkdir -p "$root/raw" "$root/results"
+
+          cat > "$root/chains.tsv" <<'EOF'
+          citrea	4114	30403	https://rpc.mainnet.citrea.xyz
+          base	8453	30184	https://mainnet.base.org
+          bsc	56	30102	https://bsc-dataseed.binance.org
+          ethereum	1	30101	https://ethereum-rpc.publicnode.com
+          EOF
+
+          cat > "$root/ofts.tsv" <<'EOF'
+          citrea	adapter	0x02B5F31C5A3CCaE18Dcb7425D7eA11dbcd0fa81B
+          base	oft	0x11030f79109269d796fd0FB956D6244e502757f7
+          bsc	oft	0x6dFbBb567Ee504016aD06E0880A96238c7EAC61d
+          ethereum	oft	0xE1CD98671869aEd24889fA86172153Cdf1d220DD
+          EOF
+
+          rpc_call() {
+            local rpc="$1" method="$2" params="$3" out="$4"
+            curl --fail --silent --show-error --location --retry 3 --connect-timeout 10 --max-time 45 \
+              -H 'content-type: application/json' \
+              --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}" \
+              "$rpc" > "$out"
+          }
+
+          call() {
+            local rpc="$1" addr="$2" data="$3" out="$4"
+            rpc_call "$rpc" eth_call "[{\"to\":\"$addr\",\"data\":\"$data\"},\"latest\"]" "$out"
+          }
+
+          pad_addr() { printf '%064s' "${1#0x}" | tr ' ' '0'; }
+          pad_u32() { printf '%064x' "$1"; }
+          pad_u16() { printf '%064x' "$1"; }
+
+          # Core Citrea xCTR / GaugeVotes / CTR state.
+          citrea_rpc=https://rpc.mainnet.citrea.xyz
+          xctr=0x2015F35030A8Ff2C0CA161a865414996F8E80AA4
+          gv=0x814B0538398596248B39e499262E6Cf53F276452
+          ctr=0x547AfD93B9c47D552059FEb556909e017f8a9b25
+          adapter=0x02B5F31C5A3CCaE18Dcb7425D7eA11dbcd0fa81B
+
+          while IFS=$'\t' read -r label selector; do
+            call "$citrea_rpc" "$xctr" "$selector" "$root/raw/xctr-$label.json"
+          done <<'EOF'
+          owner	0x8da5cb5b
+          asset	0x38d52e0f
+          gaugeVotes	0xa94d14bd
+          paused	0x5c975abb
+          epochPeriod	0xb5b7a184
+          minExitDuration	0x4144e7a6
+          maxExitDuration	0x3acb45d3
+          minExitPenaltyBps	0x6f561457
+          maxExitPenaltyBps	0xb667e4bd
+          instantExitPenaltyBps	0x7582a0f6
+          rewardEpoch	0x6bfdea2b
+          totalPendingExitAssets	0xe99029db
+          totalAssets	0x01e1d114
+          totalSupply	0x18160ddd
+          EOF
+
+          while IFS=$'\t' read -r label selector; do
+            call "$citrea_rpc" "$gv" "$selector" "$root/raw/gaugevotes-$label.json"
+          done <<'EOF'
+          xCTR	0xb29dcb60
+          gaugeVoter	0x81ca29a1
+          EOF
+
+          # Balances central to the conservation matrix.
+          call "$citrea_rpc" "$ctr" "0x70a08231$(pad_addr "$xctr")" "$root/raw/ctr-balance-xctr.json"
+          call "$citrea_rpc" "$ctr" "0x70a08231$(pad_addr "$adapter")" "$root/raw/ctr-balance-adapter.json"
+          call "$citrea_rpc" "$ctr" 0x18160ddd "$root/raw/ctr-totalSupply.json"
+
+          # OFT/OFTAdapter state and all directed peer relationships among the four scoped chains.
+          while IFS=$'\t' read -r chain kind addr; do
+            row=$(grep "^${chain}"$'\t' "$root/chains.tsv")
+            chain_id=$(echo "$row" | cut -f2)
+            own_eid=$(echo "$row" | cut -f3)
+            rpc=$(echo "$row" | cut -f4)
+            rpc_call "$rpc" eth_blockNumber '[]' "$root/raw/$chain-block.json"
+            rpc_call "$rpc" eth_getCode "[\"$addr\",\"latest\"]" "$root/raw/$chain-code.json"
+            for spec in \
+              owner:0x8da5cb5b endpoint:0x5e280f11 delegate:0xc89e4361 \
+              sharedDecimals:0x857749b0 decimalConversionRate:0x963efcaa \
+              oftVersion:0x156a0d0f oAppVersion:0x17442b70 \
+              msgInspector:0x111ecdad preCrime:0xb731ea0a totalSupply:0x18160ddd \
+              token:0xfc0c546a approvalRequired:0x9f68b964 decimals:0x313ce567; do
+              label=${spec%%:*}; selector=${spec#*:}
+              call "$rpc" "$addr" "$selector" "$root/raw/$chain-$label.json" || true
+            done
+            while IFS=$'\t' read -r peer_chain peer_chain_id peer_eid peer_rpc; do
+              peer_data="0xbb0b6a53$(pad_u32 "$peer_eid")"
+              call "$rpc" "$addr" "$peer_data" "$root/raw/$chain-peer-$peer_chain.json" || true
+              for msgtype in 1 2; do
+                opt_data="0x5535d461$(pad_u32 "$peer_eid")$(pad_u16 "$msgtype")"
+                call "$rpc" "$addr" "$opt_data" "$root/raw/$chain-options-$peer_chain-$msgtype.json" || true
+              done
+            done < "$root/chains.tsv"
+          done < "$root/ofts.tsv"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+
+          root=Path('/tmp/citrea-state')
+          def load(name):
+              p=root/'raw'/name
+              try: return json.loads(p.read_text())
+              except Exception as exc: return {'parse_error':repr(exc)}
+          def result(name):
+              d=load(name)
+              return d.get('result') if isinstance(d,dict) else None
+          def uint(name):
+              v=result(name)
+              try: return int(v,16)
+              except Exception: return None
+          def address(name):
+              v=result(name)
+              if isinstance(v,str) and v.startswith('0x') and len(v)>=42:
+                  tail=v[-40:]
+                  if int(tail,16): return '0x'+tail
+              return None
+          def bytes32(name): return result(name)
+
+          xctr_uint=['epochPeriod','minExitDuration','maxExitDuration','minExitPenaltyBps','maxExitPenaltyBps','instantExitPenaltyBps','totalPendingExitAssets','totalAssets','totalSupply']
+          xctr={k:uint(f'xctr-{k}.json') for k in xctr_uint}
+          xctr.update({
+              'owner':address('xctr-owner.json'),'asset':address('xctr-asset.json'),
+              'gaugeVotes':address('xctr-gaugeVotes.json'),
+              'paused':bool(uint('xctr-paused.json')) if uint('xctr-paused.json') is not None else None,
+              'rewardEpoch_raw':result('xctr-rewardEpoch.json'),
+              'underlying_balance_at_xctr':uint('ctr-balance-xctr.json'),
+          })
+          gv={'xCTR':address('gaugevotes-xCTR.json'),'gaugeVoter':address('gaugevotes-gaugeVoter.json')}
+          ctr={'totalSupply':uint('ctr-totalSupply.json'),'balanceAtAdapter':uint('ctr-balance-adapter.json')}
+
+          chain_rows=[]
+          for line in (root/'chains.tsv').read_text().splitlines():
+              chain,chain_id,eid,rpc=line.split('\t')
+              addr=dict((l.split('\t')[0],l.split('\t')[2]) for l in (root/'ofts.tsv').read_text().splitlines())[chain]
+              row={
+                  'chain':chain,'chainId':int(chain_id),'eid':int(eid),'address':addr,
+                  'block':uint(f'{chain}-block.json'),
+                  'owner':address(f'{chain}-owner.json'),
+                  'endpoint':address(f'{chain}-endpoint.json'),
+                  'delegate':address(f'{chain}-delegate.json'),
+                  'sharedDecimals':uint(f'{chain}-sharedDecimals.json'),
+                  'decimalConversionRate':uint(f'{chain}-decimalConversionRate.json'),
+                  'oftVersionRaw':result(f'{chain}-oftVersion.json'),
+                  'oAppVersionRaw':result(f'{chain}-oAppVersion.json'),
+                  'msgInspector':address(f'{chain}-msgInspector.json'),
+                  'preCrime':address(f'{chain}-preCrime.json'),
+                  'totalSupply':uint(f'{chain}-totalSupply.json'),
+                  'token':address(f'{chain}-token.json'),
+                  'approvalRequired':uint(f'{chain}-approvalRequired.json'),
+                  'decimals':uint(f'{chain}-decimals.json'),
+                  'runtimeCodeSha256':None,
+                  'peers':{},'enforcedOptions':{},
+              }
+              code=result(f'{chain}-code.json')
+              if isinstance(code,str) and code.startswith('0x') and len(code)>2:
+                  row['runtimeCodeSha256']=hashlib.sha256(bytes.fromhex(code[2:])).hexdigest()
+              for peer_line in (root/'chains.tsv').read_text().splitlines():
+                  peer_chain=peer_line.split('\t')[0]
+                  row['peers'][peer_chain]=bytes32(f'{chain}-peer-{peer_chain}.json')
+                  row['enforcedOptions'][peer_chain]={
+                      '1':result(f'{chain}-options-{peer_chain}-1.json'),
+                      '2':result(f'{chain}-options-{peer_chain}-2.json'),
+                  }
+              chain_rows.append(row)
+
+          matrix={'xctr':xctr,'gaugeVotes':gv,'ctr':ctr,'ofts':chain_rows}
+          # Conservative machine gates: configuration only, never declares vulnerability.
+          expected_eids={r['chain']:r['eid'] for r in chain_rows}
+          asym=[]
+          zero_peers=[]
+          for a in chain_rows:
+              for b in chain_rows:
+                  if a['chain']==b['chain']: continue
+                  av=a['peers'].get(b['chain'])
+                  bv=b['peers'].get(a['chain'])
+                  if not av or int(av,16)==0: zero_peers.append([a['chain'],b['chain']])
+                  if bool(av and int(av,16)) != bool(bv and int(bv,16)): asym.append([a['chain'],b['chain']])
+          matrix['configuration_gate']={
+              'zero_directed_peers':zero_peers,
+              'presence_asymmetries':asym,
+              'same_remote_runtime_hash':len({r['runtimeCodeSha256'] for r in chain_rows if r['chain']!='citrea'})==1,
+              'submissionAuthorized':False,
+          }
+          (root/'results'/'CITREA_LIVE_STATE_MATRIX.json').write_text(json.dumps(matrix,indent=2)+'\n')
+          (root/'results'/'CITREA_LIVE_STATE_MATRIX.md').write_text(
+              '# Citrea public read-only live state matrix\n\n'
+              f"- xCTR total assets: `{xctr['totalAssets']}`\n"
+              f"- xCTR total supply: `{xctr['totalSupply']}`\n"
+              f"- CTR locked in OFT adapter: `{ctr['balanceAtAdapter']}`\n"
+              f"- Zero directed peers: `{zero_peers}`\n"
+              f"- Peer-presence asymmetries: `{asym}`\n"
+              '- This is configuration evidence, not a vulnerability report.\n'
+          )
+          PY
+
+          find "$root" -type f -print0 | sort -z | xargs -0 sha256sum > "$root/results/SHA256SUMS.txt"
+          tar -czf /tmp/public-citrea-live-state-matrix.tar.gz -C /tmp citrea-state
+          sha256sum /tmp/public-citrea-live-state-matrix.tar.gz > /tmp/public-citrea-live-state-matrix.tar.gz.sha256
+
+      - name: Upload public read-only state artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-citrea-live-state-matrix
+          path: |
+            /tmp/public-citrea-live-state-matrix.tar.gz
+            /tmp/public-citrea-live-state-matrix.tar.gz.sha256
+            /tmp/citrea-state/results
+          retention-days: 1
+          if-no-files-found: error
