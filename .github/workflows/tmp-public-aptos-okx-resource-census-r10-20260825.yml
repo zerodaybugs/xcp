@@ -1,0 +1,125 @@
+name: Temporary public Aptos resource-account census R10
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/aptos-okx-resource-census-r10-trigger-20260825.txt
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Capture current read-only chain state
+        shell: bash
+        run: |
+          set -euo pipefail
+          resource='0xf61e2e6ef691264f5c289caa52391faf5a89c801b565dbd4c4d225d3212fc5e4'
+          package='0xd7ed3ceeb92c4e5a413e8ad7fab83ced12bf4141a49248a91b5485cb45a0ef4b'
+          rest='https://api.mainnet.aptoslabs.com/v1'
+          gql='https://api.mainnet.aptoslabs.com/v1/graphql'
+          mkdir -p artifact/rest artifact/graphql artifact/transactions
+
+          curl --fail --silent --show-error --retry 3 -D artifact/rest/ledger.headers \
+            "$rest" -o artifact/rest/ledger.json
+          curl --fail --silent --show-error --retry 3 -D artifact/rest/resource-account.headers \
+            "$rest/accounts/$resource" -o artifact/rest/resource-account.json
+          curl --fail --silent --show-error --retry 3 -D artifact/rest/resources.headers \
+            "$rest/accounts/$resource/resources?limit=1000" -o artifact/rest/resources.json
+          curl --fail --silent --show-error --retry 3 -D artifact/rest/package-modules.headers \
+            "$rest/accounts/$package/modules?limit=1000" -o artifact/rest/package-modules.json
+
+          cat > artifact/graphql/query-fa-balances.json <<EOF
+          {"query":"query FaBalances(\$owner: String!) { current_fungible_asset_balances(where: {owner_address: {_eq: \$owner}}) { owner_address asset_type amount storage_id is_primary is_frozen last_transaction_version last_transaction_timestamp } }","variables":{"owner":"$resource"}}
+          EOF
+          cat > artifact/graphql/query-account-transactions.json <<EOF
+          {"query":"query AccountTransactions(\$owner: String!) { account_transactions(where: {account_address: {_eq: \$owner}}, order_by: {transaction_version: desc}, limit: 1000) { transaction_version account_address } }","variables":{"owner":"$resource"}}
+          EOF
+          cat > artifact/graphql/query-fa-metadata.json <<'EOF'
+          {"query":"query Metadata { fungible_asset_metadata(limit: 5000) { asset_type name symbol decimals last_transaction_version } }"}
+          EOF
+
+          for q in artifact/graphql/query-*.json; do
+            out="artifact/graphql/result-$(basename "$q" .json).json"
+            curl --fail --silent --show-error --retry 3 \
+              -H 'content-type: application/json' --data-binary "@$q" "$gql" > "$out"
+          done
+
+          python3 - <<'PY'
+          import hashlib, json, pathlib, urllib.request, time
+          root = pathlib.Path('artifact')
+          resource = '0xf61e2e6ef691264f5c289caa52391faf5a89c801b565dbd4c4d225d3212fc5e4'
+          rest = 'https://api.mainnet.aptoslabs.com/v1'
+
+          fa_doc = json.loads((root/'graphql/result-query-fa-balances.json').read_text())
+          fa_rows = ((fa_doc.get('data') or {}).get('current_fungible_asset_balances') or [])
+          fa_nonzero = [r for r in fa_rows if int(r.get('amount') or 0) > 0]
+
+          meta_doc = json.loads((root/'graphql/result-query-fa-metadata.json').read_text())
+          meta_rows = ((meta_doc.get('data') or {}).get('fungible_asset_metadata') or [])
+          meta = {r.get('asset_type'): r for r in meta_rows}
+          enriched = []
+          for row in fa_nonzero:
+              item = dict(row)
+              item['metadata'] = meta.get(row.get('asset_type'))
+              enriched.append(item)
+
+          resources = json.loads((root/'rest/resources.json').read_text())
+          coin_stores = []
+          for item in resources if isinstance(resources, list) else []:
+              typ = item.get('type', '')
+              if '::coin::CoinStore<' in typ:
+                  value = (((item.get('data') or {}).get('coin') or {}).get('value'))
+                  coin_stores.append({'type': typ, 'value': value})
+          coin_nonzero = [r for r in coin_stores if int(r.get('value') or 0) > 0]
+
+          tx_doc = json.loads((root/'graphql/result-query-account-transactions.json').read_text())
+          tx_rows = ((tx_doc.get('data') or {}).get('account_transactions') or [])
+          versions = [int(r['transaction_version']) for r in tx_rows[:25]]
+          tx_failures = []
+          for version in versions:
+              url = f'{rest}/transactions/by_version/{version}'
+              target = root/'transactions'/f'{version}.json'
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as resp:
+                      target.write_bytes(resp.read())
+              except Exception as exc:
+                  tx_failures.append({'version': version, 'error': repr(exc)})
+              time.sleep(0.05)
+
+          ledger = json.loads((root/'rest/ledger.json').read_text())
+          summary = {
+              'captured_ledger_version': ledger.get('ledger_version'),
+              'captured_block_height': ledger.get('block_height'),
+              'captured_timestamp': ledger.get('ledger_timestamp'),
+              'resource_account': resource,
+              'fa_balance_rows': len(fa_rows),
+              'fa_nonzero': enriched,
+              'coin_store_rows': len(coin_stores),
+              'coin_nonzero': coin_nonzero,
+              'latest_account_transaction_versions': versions,
+              'transaction_fetch_failures': tx_failures,
+              'materiality_gate': 'PASS_ZERO_CURRENT_BALANCE' if not enriched and not coin_nonzero else 'REVIEW_NONZERO_CURRENT_BALANCE',
+          }
+          (root/'CURRENT_SUMMARY.json').write_text(json.dumps(summary, indent=2) + '\n')
+
+          lines = []
+          for p in sorted(root.rglob('*')):
+              if p.is_file() and p.name != 'SHA256SUMS.txt':
+                  lines.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.as_posix()}")
+          (root/'SHA256SUMS.txt').write_text('\n'.join(lines) + '\n')
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Upload current census
+        uses: actions/upload-artifact@v4
+        with:
+          name: aptos-okx-resource-account-census-r10
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
