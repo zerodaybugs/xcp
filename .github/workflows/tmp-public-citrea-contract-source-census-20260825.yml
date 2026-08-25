@@ -1,0 +1,133 @@
+name: Temporary public Citrea contract source census 2026-08-25
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/citrea-contract-source-census-trigger-20260825.txt
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Collect public read-only contract metadata
+        shell: bash
+        run: |
+          set +e
+          root=/tmp/citrea-census
+          mkdir -p "$root/rpc" "$root/http" "$root/results"
+          cat > "$root/contracts.tsv" <<'EOF'
+          citrea	xCTR_proxy	0x2015F35030A8Ff2C0CA161a865414996F8E80AA4	4114	https://rpc.mainnet.citrea.xyz
+          citrea	xCTR_implementation	0xe15ee513f807d12a78a80a97ab586E95c6319901	4114	https://rpc.mainnet.citrea.xyz
+          citrea	CTR	0x547AfD93B9c47D552059FEb556909e017f8a9b25	4114	https://rpc.mainnet.citrea.xyz
+          citrea	CitreaTokenOFTAdapter	0x02B5F31C5A3CCaE18Dcb7425D7eA11dbcd0fa81B	4114	https://rpc.mainnet.citrea.xyz
+          citrea	GaugeVotes_proxy	0x814B0538398596248B39e499262E6Cf53F276452	4114	https://rpc.mainnet.citrea.xyz
+          citrea	GaugeVotes_implementation	0x4fDDfcB9e334E387af824EdEd3793b947F36eb35	4114	https://rpc.mainnet.citrea.xyz
+          base	CitreaTokenOFT_Base	0x11030f79109269d796fd0FB956D6244e502757f7	8453	https://mainnet.base.org
+          bsc	CitreaTokenOFT_BSC	0x6dFbBb567Ee504016aD06E0880A96238c7EAC61d	56	https://bsc-dataseed.binance.org
+          ethereum	CitreaTokenOFT_Ethereum	0xE1CD98671869aEd24889fA86172153Cdf1d220DD	1	https://ethereum-rpc.publicnode.com
+          EOF
+
+          rpc() {
+            endpoint="$1"; method="$2"; params="$3"; out="$4"
+            status=$(curl -sS -L --retry 2 --connect-timeout 10 --max-time 45 \
+              -H 'content-type: application/json' \
+              --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}" \
+              -o "$out" -w '%{http_code}' "$endpoint")
+            echo "$status" > "$out.http_status"
+          }
+          get() {
+            url="$1"; out="$2"
+            status=$(curl -sS -L --retry 2 --connect-timeout 10 --max-time 60 \
+              -A 'Public-readonly-contract-census/1.0' \
+              -o "$out" -w '%{http_code}' "$url")
+            echo "$status" > "$out.http_status"
+          }
+
+          impl_slot=0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
+          beacon_slot=0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50
+
+          while IFS=$'\t' read -r chain label addr chainid endpoint; do
+            safe="$chain-$label-$addr"
+            rpc "$endpoint" eth_getCode "[\"$addr\",\"latest\"]" "$root/rpc/$safe-code.json"
+            rpc "$endpoint" eth_getBalance "[\"$addr\",\"latest\"]" "$root/rpc/$safe-balance.json"
+            rpc "$endpoint" eth_getStorageAt "[\"$addr\",\"$impl_slot\",\"latest\"]" "$root/rpc/$safe-implementation.json"
+            rpc "$endpoint" eth_getStorageAt "[\"$addr\",\"$beacon_slot\",\"latest\"]" "$root/rpc/$safe-beacon.json"
+            for spec in owner:0x8da5cb5b name:0x06fdde03 symbol:0x95d89b41 decimals:0x313ce567 totalSupply:0x18160ddd token:0xfc0c546a asset:0x38d52e0f endpoint:0x359e48b4 delegate:0x5c19a95c proxiableUUID:0x52d1902d paused:0x5c975abb; do
+              call_name=${spec%%:*}; selector=${spec#*:}
+              rpc "$endpoint" eth_call "[{\"to\":\"$addr\",\"data\":\"$selector\"},\"latest\"]" "$root/rpc/$safe-call-$call_name.json"
+            done
+            if [ "$chain" = citrea ]; then
+              for host in https://explorer.mainnet.citrea.xyz https://citreascan.com https://mainnet.citreascan.com; do
+                tag=$(echo "$host" | sed 's#https://##;s#[^A-Za-z0-9]#_#g')
+                get "$host/api/v2/smart-contracts/$addr" "$root/http/$safe-$tag-v2-smart-contract.json"
+                get "$host/api/v2/addresses/$addr" "$root/http/$safe-$tag-v2-address.json"
+                get "$host/api?module=contract&action=getsourcecode&address=$addr" "$root/http/$safe-$tag-legacy-source.json"
+              done
+            fi
+            for match in full_match partial_match; do
+              base="https://repo.sourcify.dev/contracts/$match/$chainid/$addr"
+              get "$base/metadata.json" "$root/http/$safe-sourcify-$match-metadata.json"
+              get "$base/" "$root/http/$safe-sourcify-$match-listing.html"
+            done
+          done < "$root/contracts.tsv"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          root=Path('/tmp/citrea-census')
+          rows=[]
+          for line in (root/'contracts.tsv').read_text().splitlines():
+              chain,label,address,chainid,endpoint=line.split('\t')
+              safe=f'{chain}-{label}-{address}'
+              def load(name):
+                  p=root/'rpc'/name
+                  try: return json.loads(p.read_text())
+                  except Exception: return {}
+              code=load(f'{safe}-code.json').get('result')
+              def addr_word(name):
+                  v=load(name).get('result')
+                  if isinstance(v,str) and v.startswith('0x') and len(v)>=42 and int(v,16):
+                      return '0x'+v[-40:]
+              source_files=[]
+              for p in sorted((root/'http').glob(f'{safe}-*')):
+                  if p.name.endswith('.http_status'): continue
+                  sp=Path(str(p)+'.http_status')
+                  status=sp.read_text().strip() if sp.exists() else ''
+                  if status=='200' and p.stat().st_size>10:
+                      source_files.append({'path':str(p.relative_to(root)),'bytes':p.stat().st_size})
+              rows.append({
+                  'chain':chain,'chain_id':int(chainid),'label':label,'address':address,
+                  'runtime_code_bytes':(len(code)-2)//2 if isinstance(code,str) and code.startswith('0x') else None,
+                  'runtime_code_sha256':hashlib.sha256(bytes.fromhex(code[2:])).hexdigest() if isinstance(code,str) and len(code)>2 else None,
+                  'implementation':addr_word(f'{safe}-implementation.json'),
+                  'beacon':addr_word(f'{safe}-beacon.json'),
+                  'native_balance_hex':load(f'{safe}-balance.json').get('result'),
+                  'source_http_200_files':source_files,
+              })
+          gate='PASS_RUNTIME_CAPTURE' if all(r['runtime_code_bytes'] for r in rows) else 'PARTIAL_RUNTIME_CAPTURE'
+          (root/'results'/'summary.json').write_text(json.dumps({'gate':gate,'contracts':rows},indent=2)+'\n')
+          (root/'results'/'summary.md').write_text('# Public Citrea contract census\n\n'+'\n'.join(f"- {r['label']}: code={r['runtime_code_bytes']} bytes, implementation={r['implementation']}, source files={len(r['source_http_200_files'])}" for r in rows)+'\n')
+          PY
+
+          find "$root" -type f -print0 | sort -z | xargs -0 sha256sum > "$root/results/SHA256SUMS.txt"
+          tar -czf /tmp/public-citrea-contract-census.tar.gz -C /tmp citrea-census
+          sha256sum /tmp/public-citrea-contract-census.tar.gz > /tmp/public-citrea-contract-census.tar.gz.sha256
+          exit 0
+
+      - name: Upload public read-only evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-citrea-contract-census
+          path: |
+            /tmp/public-citrea-contract-census.tar.gz
+            /tmp/public-citrea-contract-census.tar.gz.sha256
+            /tmp/citrea-census/results
+          retention-days: 1
+          if-no-files-found: error
