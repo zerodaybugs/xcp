@@ -1,0 +1,95 @@
+name: Temporary public OKX Exact-Out runtime export 2026-08-25
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/okx-exactout-runtime-export-trigger-20260825.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Capture public deployed runtimes read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          cat > /tmp/targets.tsv <<'EOF'
+          ethereum	0xa875Fb2204cE71679BE054d97f7fAFFeb6536D67	https://ethereum-rpc.publicnode.com	https://eth.llamarpc.com
+          arbitrum	0x9736d9a45115E33411390EbD54e5A5C3A6E25aA6	https://arbitrum-one-rpc.publicnode.com	https://arb1.arbitrum.io/rpc
+          base	0x77449Ff075C0A385796Da0762BCB46fd5cc884c6	https://base-rpc.publicnode.com	https://mainnet.base.org
+          bsc	0x5cb43Bae4f36E2f9f858232B4Dce0dbE27bb85e3	https://bsc-rpc.publicnode.com	https://bsc-dataseed.binance.org
+          EOF
+
+          rpc_call() {
+            local rpc="$1" method="$2" params="$3"
+            curl --fail --silent --show-error --retry 3 \
+              -H 'content-type: application/json' \
+              --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}" \
+              "$rpc"
+          }
+
+          while IFS=$'\t' read -r chain address rpc1 rpc2; do
+            chosen=''
+            for rpc in "$rpc1" "$rpc2"; do
+              if rpc_call "$rpc" eth_blockNumber '[]' > "/tmp/${chain}-block.json" 2>"/tmp/${chain}-rpc.err"; then
+                if jq -e '.result | type == "string"' "/tmp/${chain}-block.json" >/dev/null; then
+                  chosen="$rpc"
+                  break
+                fi
+              fi
+            done
+            test -n "$chosen"
+            block_hex="$(jq -r '.result' "/tmp/${chain}-block.json")"
+            rpc_call "$chosen" eth_getCode "[\"$address\",\"$block_hex\"]" > "artifact/${chain}-getCode.json"
+            jq -e '.result | startswith("0x")' "artifact/${chain}-getCode.json" >/dev/null
+            code="$(jq -r '.result' "artifact/${chain}-getCode.json")"
+            test "$code" != '0x'
+            printf '%s\n' "$code" > "artifact/${chain}-runtime.hex"
+            printf 'chain\t%s\naddress\t%s\nrpc\t%s\nblock_hex\t%s\nblock_dec\t%s\nruntime_bytes\t%s\n' \
+              "$chain" "$address" "$chosen" "$block_hex" "$((block_hex))" "$(( (${#code} - 2) / 2 ))" \
+              > "artifact/${chain}-metadata.tsv"
+          done < /tmp/targets.tsv
+
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          root = pathlib.Path('artifact')
+          summary=[]
+          for p in sorted(root.glob('*-runtime.hex')):
+              chain=p.name.removesuffix('-runtime.hex')
+              h=p.read_text().strip()
+              raw=bytes.fromhex(h[2:])
+              meta={}
+              for line in (root/f'{chain}-metadata.tsv').read_text().splitlines():
+                  if '\t' in line:
+                      k,v=line.split('\t',1); meta[k]=v
+              meta['sha256']=hashlib.sha256(raw).hexdigest()
+              if len(raw)>=2:
+                  mlen=int.from_bytes(raw[-2:],'big')
+                  stripped=raw[:-(mlen+2)] if mlen+2 <= len(raw) else raw
+                  meta['solidity_metadata_length']=mlen
+                  meta['metadata_stripped_bytes']=len(stripped)
+                  meta['metadata_stripped_sha256']=hashlib.sha256(stripped).hexdigest()
+                  (root/f'{chain}-runtime-metadata-stripped.hex').write_text(stripped.hex()+'\n')
+              summary.append(meta)
+          (root/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+          manifest=[]
+          for p in sorted(root.rglob('*')):
+              if p.is_file() and p.name!='SHA256SUMS.txt':
+                  manifest.append(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.as_posix()}')
+          (root/'SHA256SUMS.txt').write_text('\n'.join(manifest)+'\n')
+          PY
+
+      - name: Upload public runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: okx-exactout-current-public-runtimes
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
