@@ -1,0 +1,1 @@
+Temporary export of the official public Solidity compiler binary for reproducible local smart-contract testing. No vulnerability details, credentials, customer data, or production interaction.
