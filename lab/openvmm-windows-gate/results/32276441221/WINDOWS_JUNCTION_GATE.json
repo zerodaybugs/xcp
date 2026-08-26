@@ -1,0 +1,7 @@
+{
+    "schema":  "windows-intermediate-junction-differential-v3",
+    "read_outside_100x":  100,
+    "write_outside_100x":  100,
+    "patched_parent_reparse_reject_100x":  100,
+    "pass":  true
+}

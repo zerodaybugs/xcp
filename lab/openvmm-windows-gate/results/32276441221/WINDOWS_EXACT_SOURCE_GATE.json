@@ -1,0 +1,30 @@
+{
+    "schema":  "openvmm-windows-exact-source-gate-v4",
+    "generated_utc":  "2026-08-19T18:33:12.9284281Z",
+    "openvmm_commit":  "1dfc6bf1ed47bfc5b89c941886127525de24b191",
+    "junction_semantics_pass":  true,
+    "current_source_sequence_pass":  false,
+    "vulnerable_windows_read_test_rc":  null,
+    "vulnerable_windows_write_test_rc":  null,
+    "fixed_windows_read_test_rc":  null,
+    "fixed_windows_write_test_rc":  null,
+    "exact_windows_openvmm_read_escape":  false,
+    "exact_windows_openvmm_write_escape":  false,
+    "fixed_read_blocks":  false,
+    "fixed_write_blocks":  false,
+    "wsl_external_restricted_hit":  false,
+    "wsl_create_virtiofs_hit":  false,
+    "wsl_add_child_hit":  false,
+    "wsl_devicehost_package_hit":  false,
+    "infra_errors":  [
+                         "top_level: info: syncing channel updates for 1.95.0-x86_64-pc-windows-msvc"
+                     ],
+    "technical_gate_pass":  false,
+    "shipping_devicehost_binary_binding":  false,
+    "packaged_wsl_guest_runtime_repro":  false,
+    "external_restricted_boundary_escape":  false,
+    "functioning_control_flow_proof":  false,
+    "confirmed_high":  false,
+    "confirmed_critical":  false,
+    "submission_ready":  false
+}
