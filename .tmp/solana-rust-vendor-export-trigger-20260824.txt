@@ -1,0 +1,1 @@
+Temporary export of a pinned public Rust toolchain and complete vendored dependencies for reproducible offline source testing. No vulnerability details, credentials, customer data, or production interaction. Rerun 2.
