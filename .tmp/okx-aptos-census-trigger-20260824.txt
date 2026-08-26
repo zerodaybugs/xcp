@@ -1,0 +1,1 @@
+Temporary read-only Aptos mainnet state census of an officially documented scoped deployment. Run 2 includes public indexer-owned-object and fungible-balance records. No state-changing transaction or exploit attempt.
