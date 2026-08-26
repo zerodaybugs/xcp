@@ -1,0 +1,69 @@
+name: Temporary public PostgreSQL 16 portable export 2026-08-26
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/postgresql16-portable-trigger-20260826.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Install PostgreSQL 16
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-16 postgresql-client-16
+
+      - name: Package portable server tree and dynamic libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact/root/usr/lib/postgresql artifact/root/usr/share/postgresql artifact/root/lib
+          cp -a /usr/lib/postgresql/16 artifact/root/usr/lib/postgresql/
+          cp -a /usr/share/postgresql/16 artifact/root/usr/share/postgresql/
+          binaries=(
+            /usr/lib/postgresql/16/bin/postgres
+            /usr/lib/postgresql/16/bin/initdb
+            /usr/lib/postgresql/16/bin/pg_ctl
+            /usr/lib/postgresql/16/bin/psql
+            /usr/lib/postgresql/16/bin/createdb
+            /usr/lib/postgresql/16/bin/dropdb
+            /usr/lib/postgresql/16/bin/pg_isready
+          )
+          for binary in "${binaries[@]}"; do
+            ldd "$binary" | awk '/=> \/|^\// {for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}'
+          done | sort -u > /tmp/postgres-libs.txt
+          while IFS= read -r lib; do
+            cp -L --parents "$lib" artifact/root/
+          done < /tmp/postgres-libs.txt
+          cat > artifact/run-postgres.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          here="$(cd "$(dirname "$0")" && pwd)"
+          root="$here/root"
+          export PATH="$root/usr/lib/postgresql/16/bin:$PATH"
+          export LD_LIBRARY_PATH="$root/lib/x86_64-linux-gnu:$root/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+          export PGSHAREDIR="$root/usr/share/postgresql/16"
+          exec "$@"
+          EOF
+          chmod +x artifact/run-postgres.sh
+          artifact/run-postgres.sh postgres --version > artifact/postgres-version.txt
+          artifact/run-postgres.sh initdb --version > artifact/initdb-version.txt
+          tar -I 'zstd -12 -T0' -cf artifact/postgresql16-portable-linux-amd64.tar.zst -C artifact root run-postgres.sh postgres-version.txt initdb-version.txt
+          sha256sum artifact/* > artifact/SHA256SUMS.txt
+
+      - name: Upload portable PostgreSQL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-postgresql16-portable-linux-amd64
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
