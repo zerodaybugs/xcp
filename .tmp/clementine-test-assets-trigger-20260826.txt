@@ -1,0 +1,1 @@
+Temporary public export of official Clementine public test assets used by the project's own CI. No vulnerability details, credentials, customer data, exploit traffic, or production interaction.
