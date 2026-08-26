@@ -1,0 +1,40 @@
+name: Temporary public Clementine test assets export 2026-08-26
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/clementine-test-assets-trigger-20260826.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download official public Clementine test assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          curl --fail --location --retry 5 \
+            https://static.citrea.xyz/test-net/clementine/conf/bitvm_cache.bin \
+            -o artifact/bitvm_cache.bin
+          curl --fail --location --retry 5 \
+            https://static.citrea.xyz/dev-net/clementine/conf/bitvm_cache_dev.bin \
+            -o artifact/bitvm_cache_dev.bin
+          test -s artifact/bitvm_cache.bin
+          test -s artifact/bitvm_cache_dev.bin
+          sha256sum artifact/*.bin > artifact/SHA256SUMS.txt
+          du -h artifact/* > artifact/SIZES.txt
+
+      - name: Upload public Clementine test assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-clementine-test-assets
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
