@@ -1,4 +1,4 @@
-name: Temporary public Clementine v0.6.6 vendor toolchain export 2026-08-26
+name: Temporary public Clementine v0.6.6 source and crypto toolchain export 2026-08-26
 
 on:
   pull_request:
@@ -18,7 +18,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@1.88.0
 
-      - name: Clone pinned public source and vendor dependencies
+      - name: Clone pinned public Clementine source
         shell: bash
         run: |
           set -euo pipefail
@@ -26,32 +26,70 @@ jobs:
           git clone --filter=blob:none https://github.com/chainwayxyz/clementine.git source
           git -C source checkout --detach "$commit"
           test "$(git -C source rev-parse HEAD)" = "$commit"
-          mkdir -p source/.cargo artifact
-          cd source
-          cargo vendor --locked vendor > .cargo/config.toml
-          cargo metadata --offline --locked --format-version 1 > ../artifact/cargo-metadata.json
-          cd ..
+          mkdir -p artifact
           printf '%s\n' "$commit" > artifact/source-commit.txt
-          rustc --version > artifact/rustc-version.txt
-          cargo --version > artifact/cargo-version.txt
+          git -C source rev-parse HEAD > artifact/source-head.txt
+          sha256sum \
+            source/core/src/builder/transaction/challenge.rs \
+            source/core/src/builder/transaction/deposit_signature_owner.rs \
+            source/core/src/builder/transaction/txhandler.rs \
+            source/Cargo.lock > artifact/exact-source-critical-files.sha256
 
-      - name: Package portable Rust toolchain and complete vendored source
+      - name: Build a minimal offline crypto fixture with Clementine's locked Bitcoin version
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p crypto-fixture/src crypto-fixture/.cargo
+          cat > crypto-fixture/Cargo.toml <<'EOF'
+          [package]
+          name = "clementine-crypto-fixture"
+          version = "0.1.0"
+          edition = "2021"
+
+          [dependencies]
+          bitcoin = "=0.32.7"
+          hex = "=0.4.3"
+          EOF
+          cat > crypto-fixture/src/main.rs <<'EOF'
+          fn main() {
+              println!("bitcoin={}", bitcoin::consensus::encode::serialize_hex(&bitcoin::Transaction {
+                  version: bitcoin::transaction::Version::TWO,
+                  lock_time: bitcoin::absolute::LockTime::ZERO,
+                  input: vec![],
+                  output: vec![],
+              }));
+          }
+          EOF
+          cd crypto-fixture
+          cargo generate-lockfile
+          cargo vendor vendor > .cargo/config.toml
+          cargo metadata --offline --locked --format-version 1 > ../artifact/crypto-fixture-metadata.json
+          cargo build --offline --locked
+          cargo run --offline --locked > ../artifact/crypto-fixture-smoke.txt
+          cd ..
+          cp crypto-fixture/Cargo.lock artifact/crypto-fixture-Cargo.lock
+
+      - name: Package portable Rust toolchain, pinned source, and minimal vendored fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version > artifact/rustc-version.txt
+          cargo --version > artifact/cargo-version.txt
           sysroot="$(rustc --print sysroot)"
           printf '%s\n' "$sysroot" > artifact/original-sysroot.txt
           tar -I 'zstd -12 -T0' -cf artifact/rust-toolchain-1.88.0-linux-x86_64.tar.zst \
             -C "$(dirname "$sysroot")" "$(basename "$sysroot")"
-          rm -rf source/target source/.git
-          tar -I 'zstd -12 -T0' -cf artifact/clementine-v0.6.6-pinned-vendored-source.tar.zst \
+          rm -rf source/target source/.git crypto-fixture/target
+          tar -I 'zstd -12 -T0' -cf artifact/clementine-v0.6.6-pinned-source.tar.zst \
             -C . source
+          tar -I 'zstd -12 -T0' -cf artifact/clementine-crypto-fixture-vendored.tar.zst \
+            -C . crypto-fixture
           find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
 
-      - name: Upload public toolchain/source artifact
+      - name: Upload public source/toolchain artifact
         uses: actions/upload-artifact@v4
         with:
-          name: public-clementine-v066-vendored-source-rust188
+          name: public-clementine-v066-source-rust188-crypto-fixture
           path: artifact
           retention-days: 1
           if-no-files-found: error
