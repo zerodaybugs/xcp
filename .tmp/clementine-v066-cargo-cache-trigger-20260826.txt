@@ -1,0 +1,1 @@
+Temporary export of the exact Clementine v0.6.6 public source, public Cargo dependency cache, Rust 1.88.0 and protoc for reproducible offline builds. No vulnerability details, credentials, customer data, exploit traffic, or production interaction.
