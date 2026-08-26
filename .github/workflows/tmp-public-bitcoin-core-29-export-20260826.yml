@@ -1,0 +1,44 @@
+name: Temporary public Bitcoin Core 29 export 2026-08-26
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/bitcoin-core-29-export-trigger-20260826.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download and verify official Bitcoin Core 29.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='https://bitcoincore.org/bin/bitcoin-core-29.0'
+          mkdir -p artifact unpack
+          curl --fail --location --retry 5 "$base/SHA256SUMS" -o artifact/SHA256SUMS
+          curl --fail --location --retry 5 "$base/SHA256SUMS.asc" -o artifact/SHA256SUMS.asc
+          curl --fail --location --retry 5 \
+            "$base/bitcoin-29.0-x86_64-linux-gnu.tar.gz" \
+            -o artifact/bitcoin-29.0-x86_64-linux-gnu.tar.gz
+          grep ' bitcoin-29.0-x86_64-linux-gnu.tar.gz$' artifact/SHA256SUMS \
+            | (cd artifact && sha256sum --check -)
+          tar -xzf artifact/bitcoin-29.0-x86_64-linux-gnu.tar.gz -C unpack
+          install -m 0755 unpack/bitcoin-29.0/bin/bitcoind artifact/bitcoind-29.0
+          install -m 0755 unpack/bitcoin-29.0/bin/bitcoin-cli artifact/bitcoin-cli-29.0
+          artifact/bitcoind-29.0 --version > artifact/bitcoind-version.txt
+          artifact/bitcoin-cli-29.0 --version > artifact/bitcoin-cli-version.txt
+          sha256sum artifact/* > artifact/ARTIFACT_SHA256SUMS.txt
+
+      - name: Upload public Bitcoin Core artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-bitcoin-core-29-linux-amd64
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
