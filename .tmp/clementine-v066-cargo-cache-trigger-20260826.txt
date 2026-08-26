@@ -1,0 +1,1 @@
+Temporary reduced export of the exact Clementine v0.6.6 public Cargo dependency cache and protoc for reproducible offline builds. No vulnerability details, credentials, customer data, exploit traffic, or production interaction. Run 2.
