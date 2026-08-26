@@ -1,0 +1,1 @@
+Temporary read-only capture of public Citrea governance configuration, event counts, and call gas estimates. No vulnerability details, credentials, customer data, exploit traffic, or state-changing transaction.
