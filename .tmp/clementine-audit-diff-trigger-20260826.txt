@@ -1,0 +1,1 @@
+Temporary export of a diff between two public Clementine commits for reproducible offline review. No vulnerability details, credentials, customer data, exploit traffic, or production interaction.
