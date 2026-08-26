@@ -1,0 +1,57 @@
+name: Temporary public Clementine v0.6.6 vendor toolchain export 2026-08-26
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/clementine-v066-vendor-toolchain-trigger-20260826.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Clone pinned public source and vendor dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit='7b74491de458561951bd37f64f3367b60898dd49'
+          git clone --filter=blob:none https://github.com/chainwayxyz/clementine.git source
+          git -C source checkout --detach "$commit"
+          test "$(git -C source rev-parse HEAD)" = "$commit"
+          mkdir -p source/.cargo artifact
+          cd source
+          cargo vendor --locked vendor > .cargo/config.toml
+          cargo metadata --offline --locked --format-version 1 > ../artifact/cargo-metadata.json
+          cd ..
+          printf '%s\n' "$commit" > artifact/source-commit.txt
+          rustc --version > artifact/rustc-version.txt
+          cargo --version > artifact/cargo-version.txt
+
+      - name: Package portable Rust toolchain and complete vendored source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sysroot="$(rustc --print sysroot)"
+          printf '%s\n' "$sysroot" > artifact/original-sysroot.txt
+          tar -I 'zstd -12 -T0' -cf artifact/rust-toolchain-1.88.0-linux-x86_64.tar.zst \
+            -C "$(dirname "$sysroot")" "$(basename "$sysroot")"
+          rm -rf source/target source/.git
+          tar -I 'zstd -12 -T0' -cf artifact/clementine-v0.6.6-pinned-vendored-source.tar.zst \
+            -C . source
+          find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
+
+      - name: Upload public toolchain/source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-clementine-v066-vendored-source-rust188
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
