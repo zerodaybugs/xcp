@@ -1,0 +1,120 @@
+name: Temporary public Citrea gauge voter census 2026-08-26
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/citrea-gaugevoter-census-trigger-20260826.txt
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Capture public read-only GaugeVoter metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/citrea-gaugevoter
+          mkdir -p "$root/rpc" "$root/http" "$root/results"
+          rpc=https://rpc.mainnet.citrea.xyz
+          addr=0x8ab7f7b617b5248358ea9c9b728f3c2edbaa97a2
+
+          rpc_call() {
+            method="$1"; params="$2"; out="$3"
+            curl --fail --silent --show-error --location --retry 3 --connect-timeout 10 --max-time 45 \
+              -H 'content-type: application/json' \
+              --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}" \
+              "$rpc" > "$out"
+          }
+          call() { rpc_call eth_call "[{\"to\":\"$addr\",\"data\":\"$1\"},\"latest\"]" "$2"; }
+          get() {
+            url="$1"; out="$2"
+            curl --silent --show-error --location --retry 2 --connect-timeout 10 --max-time 60 \
+              -A 'Public-readonly-gaugevoter-census/1.0' \
+              -o "$out" -w '%{http_code}' "$url" > "$out.http_status" || true
+          }
+
+          rpc_call eth_blockNumber '[]' "$root/rpc/block.json"
+          rpc_call eth_getCode "[\"$addr\",\"latest\"]" "$root/rpc/code.json"
+          rpc_call eth_getBalance "[\"$addr\",\"latest\"]" "$root/rpc/balance.json"
+          for spec in \
+            enableUpdateVotingPowerHook:0x118f14c7 escrow:0xe2fdcc17 ivotesAdapter:0x9490895d \
+            clock:0x91ddadf4 votingActive:0x408e2727 epochId:0xaa9bbc0c \
+            currentEpochStart:0x61a8c8c4 getWriteEpochId:0x17125b3b paused:0x5c975abb \
+            dao:0x4162169f; do
+            label=${spec%%:*}; selector=${spec#*:}
+            call "$selector" "$root/rpc/call-$label.json" || true
+          done
+
+          for host in https://explorer.mainnet.citrea.xyz https://citreascan.com https://mainnet.citreascan.com; do
+            tag=$(echo "$host" | sed 's#https://##;s#[^A-Za-z0-9]#_#g')
+            get "$host/api/v2/smart-contracts/$addr" "$root/http/$tag-smart-contract.json"
+            get "$host/api/v2/addresses/$addr" "$root/http/$tag-address.json"
+            get "$host/api?module=contract&action=getsourcecode&address=$addr" "$root/http/$tag-legacy-source.json"
+          done
+          for match in full_match partial_match; do
+            get "https://repo.sourcify.dev/contracts/$match/4114/$addr/metadata.json" "$root/http/sourcify-$match-metadata.json"
+            get "https://repo.sourcify.dev/contracts/$match/4114/$addr/" "$root/http/sourcify-$match-listing.html"
+          done
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json
+          root=Path('/tmp/citrea-gaugevoter')
+          def load(p):
+              try:return json.loads(p.read_text())
+              except Exception:return {}
+          def res(name):return load(root/'rpc'/name).get('result')
+          def uint(name):
+              try:return int(res(name),16)
+              except Exception:return None
+          def addr(name):
+              v=res(name)
+              if isinstance(v,str) and len(v)>=42 and int(v,16): return '0x'+v[-40:]
+          code=res('code.json')
+          source=[]
+          for p in sorted((root/'http').glob('*')):
+              if p.name.endswith('.http_status'):continue
+              s=Path(str(p)+'.http_status')
+              status=s.read_text().strip() if s.exists() else ''
+              if status=='200' and p.stat().st_size>10:source.append({'path':str(p.relative_to(root)),'bytes':p.stat().st_size})
+          out={
+            'address':'0x8ab7f7b617b5248358ea9c9b728f3c2edbaa97a2',
+            'block':uint('block.json'),
+            'runtimeCodeBytes':(len(code)-2)//2 if isinstance(code,str) and code.startswith('0x') else None,
+            'runtimeCodeSha256':hashlib.sha256(bytes.fromhex(code[2:])).hexdigest() if isinstance(code,str) and len(code)>2 else None,
+            'enableUpdateVotingPowerHook':bool(uint('call-enableUpdateVotingPowerHook.json')) if uint('call-enableUpdateVotingPowerHook.json') is not None else None,
+            'escrow':addr('call-escrow.json'),
+            'ivotesAdapter':addr('call-ivotesAdapter.json'),
+            'clock':addr('call-clock.json'),
+            'votingActive':bool(uint('call-votingActive.json')) if uint('call-votingActive.json') is not None else None,
+            'epochId':uint('call-epochId.json'),
+            'currentEpochStart':uint('call-currentEpochStart.json'),
+            'getWriteEpochId':uint('call-getWriteEpochId.json'),
+            'paused':bool(uint('call-paused.json')) if uint('call-paused.json') is not None else None,
+            'dao':addr('call-dao.json'),
+            'sourceCandidates':source,
+          }
+          (root/'results'/'summary.json').write_text(json.dumps(out,indent=2)+'\n')
+          (root/'results'/'summary.md').write_text('# Citrea GaugeVoter read-only census\n\n'+json.dumps(out,indent=2)+'\n')
+          PY
+
+          find "$root" -type f -print0 | sort -z | xargs -0 sha256sum > "$root/results/SHA256SUMS.txt"
+          tar -czf /tmp/public-citrea-gaugevoter-census.tar.gz -C /tmp citrea-gaugevoter
+          sha256sum /tmp/public-citrea-gaugevoter-census.tar.gz > /tmp/public-citrea-gaugevoter-census.tar.gz.sha256
+
+      - name: Upload public read-only artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-citrea-gaugevoter-census
+          path: |
+            /tmp/public-citrea-gaugevoter-census.tar.gz
+            /tmp/public-citrea-gaugevoter-census.tar.gz.sha256
+            /tmp/citrea-gaugevoter/results
+          retention-days: 1
+          if-no-files-found: error
