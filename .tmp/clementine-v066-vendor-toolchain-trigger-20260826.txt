@@ -1,1 +1,1 @@
-Template trigger for a temporary public export of pinned public Clementine source, public dependencies, and a public Rust toolchain. No vulnerability details, credentials, customer data, exploit traffic, or production interaction.
+Temporary public export of pinned Clementine v0.6.6 source, public vendored dependencies, and Rust 1.88.0 for reproducible offline review. No vulnerability details, credentials, customer data, exploit traffic, or production interaction. Run 1.
