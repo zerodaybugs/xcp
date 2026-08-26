@@ -1,0 +1,58 @@
+name: Temporary public Clementine CLI source Rust export 2026-08-26
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/clementine-cli-source-rust189-export-trigger-20260826.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.89.0
+
+      - name: Clone pinned public source and vendor dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit='ea00fb30cc5be1370300763f2e4d0a12c59650de'
+          git clone --filter=blob:none https://github.com/chainwayxyz/clementine-cli.git source
+          git -C source checkout --detach "$commit"
+          test "$(git -C source rev-parse HEAD)" = "$commit"
+          mkdir -p source/.cargo artifact
+          cd source
+          cargo vendor --locked vendor > .cargo/config.toml
+          cargo metadata --offline --locked --format-version 1 > ../artifact/cargo-metadata.json
+          cargo test --offline --locked --no-run 2>&1 | tee ../artifact/baseline-build.log
+          cd ..
+          printf '%s\n' "$commit" > artifact/source-commit.txt
+          rustc --version > artifact/rustc-version.txt
+          cargo --version > artifact/cargo-version.txt
+
+      - name: Package portable toolchain and source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sysroot="$(rustc --print sysroot)"
+          printf '%s\n' "$sysroot" > artifact/original-sysroot.txt
+          tar -I 'zstd -12 -T0' -cf artifact/rust-toolchain-1.89.0-linux-x86_64.tar.zst \
+            -C "$(dirname "$sysroot")" "$(basename "$sysroot")"
+          rm -rf source/target source/.git
+          tar -I 'zstd -12 -T0' -cf artifact/clementine-cli-pinned-vendored-source.tar.zst \
+            -C . source
+          find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
+
+      - name: Upload public source/toolchain artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-clementine-cli-source-rust189
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
