@@ -36,26 +36,22 @@ jobs:
           cargo --version > cargo-version.txt
           protoc --version > protoc-version.txt
 
-      - name: Package source, Cargo registry/git caches, toolchain and protoc
+      - name: Package only Cargo registry/git caches and protoc
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifact/cache artifact/bin
-          rm -rf source/.git source/target
-          tar -I 'zstd -10 -T0' -cf artifact/clementine-v0.6.6-source.tar.zst source
-          tar -I 'zstd -10 -T0' -cf artifact/cargo-home-registry-git.tar.zst \
+          mkdir -p artifact/bin
+          tar -I 'zstd -12 -T0' -cf artifact/cargo-home-registry-git.tar.zst \
             -C "$CARGO_HOME" registry git
-          sysroot="$(rustc --print sysroot)"
-          tar -I 'zstd -10 -T0' -cf artifact/rust-toolchain-1.88.0-linux-x86_64.tar.zst \
-            -C "$(dirname "$sysroot")" "$(basename "$sysroot")"
           cp "$(command -v protoc)" artifact/bin/protoc
           cp source-commit.txt rustc-version.txt cargo-version.txt protoc-version.txt cargo-metadata.json artifact/
+          du -h artifact/* | tee artifact/SIZES.txt
           find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
 
-      - name: Upload public offline-build artifact
+      - name: Upload reduced public offline-build cache
         uses: actions/upload-artifact@v4
         with:
-          name: public-clementine-v066-offline-build-cache
+          name: public-clementine-v066-cargo-cache-reduced
           path: artifact
           retention-days: 1
           if-no-files-found: error
