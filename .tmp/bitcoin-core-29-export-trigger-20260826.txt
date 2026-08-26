@@ -1,0 +1,1 @@
+Template trigger for a temporary public export of official Bitcoin Core 29.0 binaries and upstream checksums for local regtest testing. No vulnerability details, credentials, customer data, exploit traffic, or production interaction.
