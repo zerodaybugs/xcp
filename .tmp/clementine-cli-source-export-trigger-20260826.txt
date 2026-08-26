@@ -1,0 +1,1 @@
+Temporary export of pinned public Clementine CLI source for isolated local review. No vulnerability details, credentials, customer data, exploit traffic, or production interaction.
