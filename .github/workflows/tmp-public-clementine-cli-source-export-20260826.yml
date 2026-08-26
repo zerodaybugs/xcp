@@ -1,0 +1,38 @@
+name: Temporary public Clementine CLI source export 2026-08-26
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/clementine-cli-source-export-trigger-20260826.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Clone pinned public Clementine CLI source
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit='ea00fb30cc5be1370300763f2e4d0a12c59650de'
+          mkdir -p artifact
+          git clone --filter=blob:none https://github.com/chainwayxyz/clementine-cli.git source
+          git -C source checkout --detach "$commit"
+          test "$(git -C source rev-parse HEAD)" = "$commit"
+          rm -rf source/.git
+          printf '%s\n' "$commit" > artifact/source-commit.txt
+          tar -I 'zstd -12 -T0' -cf artifact/clementine-cli-pinned-source.tar.zst source
+          find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
+
+      - name: Upload public source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-clementine-cli-pinned-source
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
