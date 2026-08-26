@@ -1,0 +1,58 @@
+name: Temporary public Citrea v2.7 source Rust export 2026-08-26
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/citrea-v270-source-rust188-export-trigger-20260826.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Clone pinned Citrea v2.7 release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit='d62efabf15cfb3333d3e5bcd69150facaf5c1751'
+          git clone --filter=blob:none https://github.com/chainwayxyz/citrea.git source
+          git -C source checkout --detach "$commit"
+          test "$(git -C source rev-parse HEAD)" = "$commit"
+          mkdir -p artifact
+          printf '%s\n' "$commit" > artifact/source-commit.txt
+          rustc --version > artifact/rustc-version.txt
+          cargo --version > artifact/cargo-version.txt
+          sha256sum \
+            source/crates/sequencer/src/tx_validator.rs \
+            source/crates/sequencer/src/mempool.rs \
+            source/crates/sequencer/src/runner.rs \
+            source/crates/bitcoin-da/src/monitoring.rs \
+            source/Cargo.lock > artifact/security-surface-source-sha256.txt
+
+      - name: Package source and portable Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sysroot="$(rustc --print sysroot)"
+          printf '%s\n' "$sysroot" > artifact/original-sysroot.txt
+          tar -I 'zstd -12 -T0' -cf artifact/rust-toolchain-1.88.0-linux-x86_64.tar.zst \
+            -C "$(dirname "$sysroot")" "$(basename "$sysroot")"
+          rm -rf source/.git source/target
+          tar -I 'zstd -12 -T0' -cf artifact/citrea-v2.7.0-pinned-source.tar.zst -C . source
+          find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
+
+      - name: Upload public source/toolchain artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-citrea-v270-source-rust188
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
