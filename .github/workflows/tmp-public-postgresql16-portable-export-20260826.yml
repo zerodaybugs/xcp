@@ -58,7 +58,7 @@ jobs:
           artifact/run-postgres.sh postgres --version > artifact/postgres-version.txt
           artifact/run-postgres.sh initdb --version > artifact/initdb-version.txt
           tar -I 'zstd -12 -T0' -cf artifact/postgresql16-portable-linux-amd64.tar.zst -C artifact root run-postgres.sh postgres-version.txt initdb-version.txt
-          sha256sum artifact/* > artifact/SHA256SUMS.txt
+          find artifact -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
 
       - name: Upload portable PostgreSQL artifact
         uses: actions/upload-artifact@v4
