@@ -1,0 +1,61 @@
+name: Temporary public Clementine v0.6.6 Cargo cache export 2026-08-26
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/clementine-v066-cargo-cache-trigger-20260826.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Install pinned Rust and protoc
+        uses: dtolnay/rust-toolchain@1.88.0
+      - uses: arduino/setup-protoc@v3
+
+      - name: Fetch exact public dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit='7b74491de458561951bd37f64f3367b60898dd49'
+          git clone --filter=blob:none https://github.com/chainwayxyz/clementine.git source
+          git -C source checkout --detach "$commit"
+          test "$(git -C source rev-parse HEAD)" = "$commit"
+          cd source
+          cargo fetch --locked
+          cargo metadata --locked --format-version 1 > ../cargo-metadata.json
+          cd ..
+          printf '%s\n' "$commit" > source-commit.txt
+          rustc --version > rustc-version.txt
+          cargo --version > cargo-version.txt
+          protoc --version > protoc-version.txt
+
+      - name: Package source, Cargo registry/git caches, toolchain and protoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact/cache artifact/bin
+          rm -rf source/.git source/target
+          tar -I 'zstd -10 -T0' -cf artifact/clementine-v0.6.6-source.tar.zst source
+          tar -I 'zstd -10 -T0' -cf artifact/cargo-home-registry-git.tar.zst \
+            -C "$CARGO_HOME" registry git
+          sysroot="$(rustc --print sysroot)"
+          tar -I 'zstd -10 -T0' -cf artifact/rust-toolchain-1.88.0-linux-x86_64.tar.zst \
+            -C "$(dirname "$sysroot")" "$(basename "$sysroot")"
+          cp "$(command -v protoc)" artifact/bin/protoc
+          cp source-commit.txt rustc-version.txt cargo-version.txt protoc-version.txt cargo-metadata.json artifact/
+          find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
+
+      - name: Upload public offline-build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-clementine-v066-offline-build-cache
+          path: artifact
+          retention-days: 1
+          if-no-files-found: error
