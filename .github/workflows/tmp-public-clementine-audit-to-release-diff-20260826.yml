@@ -1,0 +1,68 @@
+name: Temporary public Clementine audit-to-release diff export 2026-08-26
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/clementine-audit-diff-trigger-20260826.txt
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Clone public source and export audit-to-release delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='aa76265121b1b8645ddcbc94724367c713f0cf79'
+          head='7b74491de458561951bd37f64f3367b60898dd49'
+          git clone --filter=blob:none https://github.com/chainwayxyz/clementine.git source
+          git -C source fetch --no-tags origin "$base" "$head"
+          test "$(git -C source rev-parse "$base")" = "$base"
+          test "$(git -C source rev-parse "$head")" = "$head"
+          mkdir -p artifact/head-changed-files artifact/base-changed-files
+          git -C source log --reverse --date=iso-strict --format='%H%x09%ad%x09%an%x09%s' "$base..$head" > artifact/commits.tsv
+          git -C source diff --stat "$base..$head" > artifact/diff-stat.txt
+          git -C source diff --numstat "$base..$head" > artifact/diff-numstat.tsv
+          git -C source diff --name-status "$base..$head" > artifact/diff-name-status.tsv
+          git -C source diff --find-renames --find-copies --binary "$base..$head" -- \
+            ':(exclude)*.pdf' ':(exclude)*.bin' > artifact/audit-fix-to-v0.6.6.patch
+          while IFS=$'\t' read -r status p1 p2; do
+            path="$p1"
+            case "$status" in R*|C*) path="$p2" ;; esac
+            case "$path" in
+              *.rs|*.toml|*.proto|*.sql|*.sh|*.md|Cargo.lock|Cargo.toml|rust-toolchain.toml)
+                mkdir -p "artifact/head-changed-files/$(dirname "$path")"
+                git -C source show "$head:$path" > "artifact/head-changed-files/$path" 2>/dev/null || true
+                mkdir -p "artifact/base-changed-files/$(dirname "$p1")"
+                git -C source show "$base:$p1" > "artifact/base-changed-files/$p1" 2>/dev/null || true
+                ;;
+            esac
+          done < artifact/diff-name-status.tsv
+          printf '%s\n' "$base" > artifact/base-commit.txt
+          printf '%s\n' "$head" > artifact/head-commit.txt
+          rg -n --hidden -i \
+            'unsafe|unwrap\(|expect\(|panic!|unreachable!|todo!|signature|sighash|nonce|session|auth|verify|withdraw|deposit|reimburse|challenge|operator|security_council|threshold|proof|cache|reorg|transaction|outpoint' \
+            artifact/head-changed-files > artifact/security-surface-grep.txt || true
+          find artifact -type f -print0 | sort -z | xargs -0 sha256sum > artifact/SHA256SUMS.txt
+          tar -I 'zstd -12 -T0' -cf /tmp/public-clementine-audit-to-release-diff.tar.zst artifact
+          sha256sum /tmp/public-clementine-audit-to-release-diff.tar.zst > /tmp/public-clementine-audit-to-release-diff.tar.zst.sha256
+
+      - name: Upload public diff artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-clementine-audit-to-release-diff
+          path: |
+            /tmp/public-clementine-audit-to-release-diff.tar.zst
+            /tmp/public-clementine-audit-to-release-diff.tar.zst.sha256
+            artifact/commits.tsv
+            artifact/diff-stat.txt
+            artifact/diff-name-status.tsv
+            artifact/security-surface-grep.txt
+          retention-days: 1
+          if-no-files-found: error
