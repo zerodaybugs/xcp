@@ -1,0 +1,1 @@
+Template trigger for a temporary public export of PostgreSQL 16 public binaries and runtime libraries for isolated local integration testing. No vulnerability details, credentials, customer data, exploit traffic, or production interaction.
