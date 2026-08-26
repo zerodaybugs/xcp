@@ -1,0 +1,305 @@
+name: Temporary public Citrea governance telemetry 2026-08-26
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .tmp/citrea-governance-telemetry-trigger-20260826.txt
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Capture public read-only governance telemetry
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/citrea-governance-telemetry
+          mkdir -p "$root/results"
+          cat > "$root/capture.py" <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import time
+          import urllib.error
+          import urllib.request
+          from collections import Counter, defaultdict
+          from pathlib import Path
+
+          RPC = "https://rpc.mainnet.citrea.xyz"
+          GAUGE_VOTER = "0x8ab7f7b617b5248358ea9c9b728f3c2edbaa97a2"
+          ESCROW = "0x814b0538398596248b39e499262e6cf53f276452"
+          XCTR = "0x2015f35030a8ff2c0ca161a865414996f8e80aa4"
+          CREATION_TX = "0x9458ea6441b689e5aa2948cfb7dcb27bd98413f1e4ad2bb755ad426504bc1525"
+          VOTED_TOPIC = "0x9597ca1d5e7730de0b0614eeeea16ce1a90d9798253c18b1b4941ae3d2d454ec"
+          DELEGATE_CHANGED_TOPIC = "0x3134e8a2e6d97e929a7e54011ea5485d7d196dd5f0ba4d4ef95803e8e3fc257f"
+          OUT = Path("/tmp/citrea-governance-telemetry/results")
+
+          def rpc(method: str, params: list, retries: int = 4):
+              payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+              last = None
+              for attempt in range(retries):
+                  req = urllib.request.Request(
+                      RPC,
+                      data=payload,
+                      headers={"content-type": "application/json", "user-agent": "public-readonly-governance-telemetry/1.0"},
+                  )
+                  try:
+                      with urllib.request.urlopen(req, timeout=60) as response:
+                          data = json.loads(response.read())
+                      if "error" in data:
+                          raise RuntimeError(data["error"])
+                      return data.get("result")
+                  except Exception as exc:
+                      last = exc
+                      time.sleep(min(8, 2 ** attempt))
+              raise RuntimeError(f"RPC {method} failed: {last!r}")
+
+          def encode_address(address: str) -> str:
+              return address.lower().removeprefix("0x").rjust(64, "0")
+
+          def topic_address(topic: str) -> str:
+              return "0x" + topic[-40:].lower()
+
+          def decode_address_array(raw: str | None) -> list[str]:
+              if not raw or raw == "0x":
+                  return []
+              data = bytes.fromhex(raw[2:])
+              if len(data) < 64:
+                  return []
+              offset = int.from_bytes(data[0:32], "big")
+              if offset + 32 > len(data):
+                  return []
+              length = int.from_bytes(data[offset:offset+32], "big")
+              out = []
+              pos = offset + 32
+              for _ in range(length):
+                  if pos + 32 > len(data):
+                      break
+                  out.append("0x" + data[pos+12:pos+32].hex())
+                  pos += 32
+              return out
+
+          def decode_uint(raw: str | None) -> int | None:
+              try:
+                  return int(raw, 16) if raw not in (None, "0x") else None
+              except Exception:
+                  return None
+
+          def call(to: str, data: str, from_addr: str | None = None, gas: int | None = None):
+              tx = {"to": to, "data": data}
+              if from_addr:
+                  tx["from"] = from_addr
+              if gas:
+                  tx["gas"] = hex(gas)
+              return rpc("eth_call", [tx, "latest"])
+
+          latest = int(rpc("eth_blockNumber", []), 16)
+          latest_block = rpc("eth_getBlockByNumber", [hex(latest), False])
+          block_gas_limit = int(latest_block["gasLimit"], 16)
+          creation_receipt = rpc("eth_getTransactionReceipt", [CREATION_TX])
+          creation_block = int(creation_receipt["blockNumber"], 16)
+
+          all_gauges_raw = call(GAUGE_VOTER, "0xc946c5cc")
+          all_gauges = decode_address_array(all_gauges_raw)
+
+          def collect_logs(address: str, topic0: str, start: int, end: int, initial_chunk: int = 20_000):
+              logs = []
+              cursor = start
+              chunk = initial_chunk
+              while cursor <= end:
+                  to_block = min(end, cursor + chunk - 1)
+                  try:
+                      batch = rpc("eth_getLogs", [{
+                          "address": address,
+                          "fromBlock": hex(cursor),
+                          "toBlock": hex(to_block),
+                          "topics": [topic0],
+                      }])
+                      logs.extend(batch)
+                      cursor = to_block + 1
+                      if len(batch) < 100 and chunk < 100_000:
+                          chunk = min(100_000, chunk * 2)
+                  except Exception:
+                      if chunk <= 500:
+                          raise
+                      chunk = max(500, chunk // 2)
+              return logs
+
+          voted_logs = collect_logs(GAUGE_VOTER, VOTED_TOPIC, creation_block, latest)
+          delegate_logs = collect_logs(ESCROW, DELEGATE_CHANGED_TOPIC, creation_block, latest)
+
+          voter_event_counts = Counter()
+          voter_gauge_sets: dict[str, set[str]] = defaultdict(set)
+          last_vote_block: dict[str, int] = {}
+          for log in voted_logs:
+              topics = log.get("topics", [])
+              if len(topics) >= 3:
+                  voter = topic_address(topics[1])
+                  gauge = topic_address(topics[2])
+                  voter_event_counts[voter] += 1
+                  voter_gauge_sets[voter].add(gauge)
+                  last_vote_block[voter] = max(last_vote_block.get(voter, 0), int(log["blockNumber"], 16))
+
+          delegators_by_delegate: dict[str, set[str]] = defaultdict(set)
+          latest_delegate: dict[str, str] = {}
+          for log in delegate_logs:
+              topics = log.get("topics", [])
+              if len(topics) >= 4:
+                  delegator = topic_address(topics[1])
+                  new_delegate = topic_address(topics[3])
+                  latest_delegate[delegator] = new_delegate
+          for delegator, delegate in latest_delegate.items():
+              if int(delegate, 16) != 0:
+                  delegators_by_delegate[delegate].add(delegator)
+
+          candidates = sorted(
+              set(voter_event_counts) | set(delegators_by_delegate),
+              key=lambda a: (voter_event_counts[a], len(delegators_by_delegate[a])),
+              reverse=True,
+          )[:150]
+
+          rows = []
+          for voter in candidates:
+              encoded = encode_address(voter)
+              try:
+                  gauges = decode_address_array(call(GAUGE_VOTER, "0xfdd644d8" + encoded))
+              except Exception:
+                  gauges = []
+              try:
+                  used = decode_uint(call(GAUGE_VOTER, "0x2a63061a" + encoded))
+              except Exception:
+                  used = None
+              try:
+                  live_votes = decode_uint(call(ESCROW, "0x9ab24eb0" + encoded))
+              except Exception:
+                  live_votes = None
+              try:
+                  xctr_balance = decode_uint(call(XCTR, "0x70a08231" + encoded))
+              except Exception:
+                  xctr_balance = None
+              try:
+                  delegate = topic_address(call(ESCROW, "0x587cde1e" + encoded))
+              except Exception:
+                  delegate = None
+
+              update_data = "0x0a29e4c0" + encoded + ("0" * 64)
+              try:
+                  update_estimate = int(rpc("eth_estimateGas", [{
+                      "from": ESCROW,
+                      "to": GAUGE_VOTER,
+                      "data": update_data,
+                      "gasPrice": "0x0",
+                  }]), 16)
+                  update_error = None
+              except Exception as exc:
+                  update_estimate = None
+                  update_error = repr(exc)
+
+              delegate_zero_data = "0x5c19a95c" + ("0" * 64)
+              try:
+                  delegate_estimate = int(rpc("eth_estimateGas", [{
+                      "from": voter,
+                      "to": ESCROW,
+                      "data": delegate_zero_data,
+                      "gasPrice": "0x0",
+                  }]), 16)
+                  delegate_error = None
+              except Exception as exc:
+                  delegate_estimate = None
+                  delegate_error = repr(exc)
+
+              start_exit_estimate = None
+              start_exit_error = None
+              if xctr_balance and xctr_balance > 0:
+                  shares = min(xctr_balance, 10**18)
+                  start_exit_data = "0x06f3a401" + hex(shares)[2:].rjust(64, "0")
+                  try:
+                      start_exit_estimate = int(rpc("eth_estimateGas", [{
+                          "from": voter,
+                          "to": XCTR,
+                          "data": start_exit_data,
+                          "gasPrice": "0x0",
+                      }]), 16)
+                  except Exception as exc:
+                      start_exit_error = repr(exc)
+
+              rows.append({
+                  "voter": voter,
+                  "voted_event_count": voter_event_counts[voter],
+                  "event_unique_gauges": len(voter_gauge_sets[voter]),
+                  "current_gauges_voted_for": gauges,
+                  "current_gauge_count": len(gauges),
+                  "used_voting_power": used,
+                  "live_get_votes": live_votes,
+                  "xctr_balance": xctr_balance,
+                  "current_delegate": delegate,
+                  "current_delegator_count": len(delegators_by_delegate[voter]),
+                  "last_vote_block": last_vote_block.get(voter),
+                  "update_voting_power_estimate": update_estimate,
+                  "update_voting_power_error": update_error,
+                  "delegate_zero_estimate": delegate_estimate,
+                  "delegate_zero_error": delegate_error,
+                  "start_exit_estimate": start_exit_estimate,
+                  "start_exit_error": start_exit_error,
+              })
+
+          rows.sort(key=lambda r: (r["current_gauge_count"], r["update_voting_power_estimate"] or 0), reverse=True)
+          max_row = rows[0] if rows else None
+          gas_ratios = [r["update_voting_power_estimate"] / block_gas_limit for r in rows if r["update_voting_power_estimate"]]
+
+          summary = {
+              "gate": "PASS_READONLY_CAPTURE",
+              "latest_block": latest,
+              "block_gas_limit": block_gas_limit,
+              "creation_block": creation_block,
+              "gauge_count": len(all_gauges),
+              "gauges": all_gauges,
+              "voted_log_count": len(voted_logs),
+              "unique_voters": len(voter_event_counts),
+              "delegate_changed_log_count": len(delegate_logs),
+              "current_delegator_count": len(latest_delegate),
+              "queried_candidate_count": len(rows),
+              "max_current_gauge_count_for_voter": max((r["current_gauge_count"] for r in rows), default=0),
+              "max_update_voting_power_estimate": max((r["update_voting_power_estimate"] or 0 for r in rows), default=0),
+              "max_update_to_block_gas_ratio": max(gas_ratios, default=0),
+              "max_row": max_row,
+              "rows": rows,
+              "submission_authorized": False,
+          }
+          (OUT / "CITREA_GOVERNANCE_TELEMETRY.json").write_text(json.dumps(summary, indent=2) + "\n")
+          (OUT / "CITREA_GOVERNANCE_TELEMETRY.md").write_text(
+              "# Citrea public read-only governance telemetry\n\n"
+              f"- Latest block: `{latest}`\n"
+              f"- Block gas limit: `{block_gas_limit}`\n"
+              f"- Gauge count: `{len(all_gauges)}`\n"
+              f"- Voted logs: `{len(voted_logs)}`\n"
+              f"- Unique voters: `{len(voter_event_counts)}`\n"
+              f"- Maximum current gauges voted for: `{summary['max_current_gauge_count_for_voter']}`\n"
+              f"- Maximum updateVotingPower estimate: `{summary['max_update_voting_power_estimate']}`\n"
+              f"- Maximum estimate / block gas limit: `{summary['max_update_to_block_gas_ratio']:.6f}`\n"
+              "- This is public configuration/telemetry evidence, not a vulnerability report.\n"
+          )
+          PY
+
+          python3 "$root/capture.py"
+          find "$root" -type f -print0 | sort -z | xargs -0 sha256sum > "$root/results/SHA256SUMS.txt"
+          tar -czf /tmp/public-citrea-governance-telemetry.tar.gz -C /tmp citrea-governance-telemetry
+          sha256sum /tmp/public-citrea-governance-telemetry.tar.gz > /tmp/public-citrea-governance-telemetry.tar.gz.sha256
+
+      - name: Upload public read-only telemetry
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-citrea-governance-telemetry
+          path: |
+            /tmp/public-citrea-governance-telemetry.tar.gz
+            /tmp/public-citrea-governance-telemetry.tar.gz.sha256
+            /tmp/citrea-governance-telemetry/results
+          retention-days: 1
+          if-no-files-found: error
