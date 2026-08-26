@@ -1,1 +1,1 @@
-Temporary read-only capture of public metadata for the Citrea gauge-voter integration. No vulnerability details, credentials, customer data, exploit traffic, or state-changing transaction.
+Temporary read-only capture completed. No vulnerability details, credentials, customer data, exploit traffic, or state-changing transaction.
