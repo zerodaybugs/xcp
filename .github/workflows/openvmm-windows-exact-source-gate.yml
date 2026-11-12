@@ -1,0 +1,71 @@
+name: OpenVMM Windows exact-source gate
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/openvmm-windows-exact-source-gate.yml'
+      - 'lab/openvmm-windows-gate/windows_raw_fuse_tests.rs'
+      - 'lab/openvmm-windows-gate/prepare_source.py'
+      - 'lab/openvmm-windows-gate/run_gate.ps1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  exact-windows-source-gate:
+    runs-on: windows-2025
+    timeout-minutes: 330
+    steps:
+      - name: Check out temporary research branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Execute owned-runner exact-source differential
+        id: research_gate
+        continue-on-error: true
+        shell: powershell
+        run: |
+          & .\lab\openvmm-windows-gate\run_gate.ps1
+          exit $LASTEXITCODE
+
+      - name: Upload complete Windows gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openvmm-windows-exact-source-gate-${{ github.run_id }}
+          path: lab/openvmm-windows-gate/results/${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 9
+
+      - name: Commit machine verdict to temporary branch
+        if: always() && github.event_name == 'pull_request'
+        shell: powershell
+        run: |
+          $Result = 'lab/openvmm-windows-gate/results/${{ github.run_id }}/WINDOWS_EXACT_SOURCE_GATE.json'
+          if (-not (Test-Path -LiteralPath $Result)) {
+            throw 'Machine verdict missing; refusing silent success.'
+          }
+          git config user.name 'research-gate-bot'
+          git config user.email 'research-gate-bot@users.noreply.github.com'
+          git add -- 'lab/openvmm-windows-gate/results/${{ github.run_id }}'
+          git commit -m 'Record private-lab Windows exact-source gate ${{ github.run_id }}'
+          git push origin HEAD:${{ github.head_ref }}
+
+      - name: Enforce fail-closed machine result production
+        if: always()
+        shell: powershell
+        run: |
+          $Result = 'lab/openvmm-windows-gate/results/${{ github.run_id }}/WINDOWS_EXACT_SOURCE_GATE.json'
+          if (-not (Test-Path -LiteralPath $Result)) {
+            throw 'WINDOWS_EXACT_SOURCE_GATE.json was not produced.'
+          }
+          $Gate = Get-Content -LiteralPath $Result -Raw | ConvertFrom-Json
+          if ($Gate.submission_ready -ne $false) {
+            throw 'Fail-closed submission verdict was violated.'
+          }

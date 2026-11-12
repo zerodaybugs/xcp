@@ -1,0 +1,41 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260819183310
+Username: runnervmk2qs2\runneradmin
+RunAs User: runnervmk2qs2\runneradmin
+Configuration Name: 
+Machine: runnervmk2qs2 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.EXE -command . 'D:\a\_temp\0e02b9cb-ec96-4211-bba7-0af7b7f02c28.ps1'
+Process ID: 3168
+PSVersion: 5.1.26100.33158
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.33158
+BuildVersion: 10.0.26100.33158
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+PS>TerminatingError(rustup.exe): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: info: syncing channel updates for 1.95.0-x86_64-pc-windows-msvc"
+PS>TerminatingError(Get-FileHash): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The file 'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' cannot be read: The process cannot access the file 'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' because it is being used by another process."
+>> TerminatingError(Get-FileHash): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The file 'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' cannot be read: The process cannot access the file 'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' because it is being used by another process."
+>> TerminatingError(Get-FileHash): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The file 'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' cannot be read: The process cannot access the file 'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' because it is being used by another process."
+>> TerminatingError(Get-FileHash): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The file 'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' cannot be read: The process cannot access the file 'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' because it is being used by another process."
+>> TerminatingError(Get-FileHash): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: The file 'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' cannot be read: The process cannot access the file 'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' because it is being used by another process."
+Get-FileHash : The file 'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' cannot
+be read: The process cannot access the file
+'D:\a\xcp\xcp\lab\openvmm-windows-gate\results\32276441221\POWERSHELL_TRANSCRIPT.log' because it is being used by
+another process.
+At D:\a\xcp\xcp\lab\openvmm-windows-gate\run_gate.ps1:220 char:18
++ ...    $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $File.FullNam ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ReadError: (D:\a\xcp\xcp\la..._TRANSCRIPT.log:PSObject) [Write-Error], WriteErrorExcepti
+   on
+    + FullyQualifiedErrorId : FileReadError,Get-FileHash
+
+PS>$global:?
+False
+**********************
+Windows PowerShell transcript end
+End time: 20260819183313
+**********************
